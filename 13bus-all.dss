@@ -1,0 +1,789 @@
+! By Fathy Aboshady (fathy.aboshady@gmail.com)
+! Adaptaded Darlene Dullius
+! Cargas MT adicionadas (mesmas do scrip original de 13 barras)
+Clear 
+
+new circuit.IEEE13Nodeckt 
+~ basekv=115 pu=1.0 phases=3 bus1=SourceBus  
+~ Angle=30                                                      
+~ MVAsc3=20000 MVASC1=21000    ! stiffen the source to approximate inf source
+
+!SUB TRANSFORMER DEFINITION 
+! Although this data was given, it does not appear to be used in the test case results
+! The published test case starts at 1.0 per unit at Bus 650. To make this happen, we will change the impedance
+! on the transformer to something tiny by dividing by 1000 using the DSS in-line RPN math
+New Transformer.Sub Phases=3 Windings=2   XHL=(8 1000 /)
+~ wdg=1 bus=SourceBus   conn=delta  kv=115  kva=5000   %r=(.5 1000 /)  XHT=4
+~ wdg=2 bus=650             conn=wye    kv=4.16  kva=5000   %r=(.5 1000 /)   XLT=4
+
+! FEEDER 1-PHASE VOLTAGE REGULATORS
+! Define low-impedance 2-wdg transformer
+
+New Transformer.Reg1 phases=1 XHL=0.01 kVAs=[1666 1666]
+~ Buses=[650.1 RG60.1] kVs=[2.4  2.4] %LoadLoss=0.01
+new regcontrol.Reg1  transformer=Reg1 winding=2  vreg=122  band=2  ptratio=20 ctprim=700  R=3   X=9 EventLog=Yes
+
+New Transformer.Reg2 phases=1 XHL=0.01 kVAs=[1666 1666]
+~ Buses=[650.2 RG60.2] kVs=[2.4  2.4] %LoadLoss=0.01
+new regcontrol.Reg2  transformer=Reg2 winding=2  vreg=122  band=2  ptratio=20 ctprim=700  R=3   X=9 EventLog=Yes
+
+New Transformer.Reg3 phases=1 XHL=0.01 kVAs=[1666 1666]
+~ Buses=[650.3 RG60.3] kVs=[2.4  2.4] %LoadLoss=0.01
+new regcontrol.Reg3  transformer=Reg3 winding=2  vreg=122  band=2  ptratio=20 ctprim=700  R=3   X=9 EventLog=Yes
+
+transformer.Reg1.Taps= [1 1.031]  
+transformer.Reg2.Taps= [1 1.031]  
+transformer.Reg3.Taps= [1 1.031]  
+
+/* regcontrol.Reg1.enabled=no
+regcontrol.Reg2.enabled=no
+regcontrol.Reg3.enabled=no */
+
+!---------------------------------------------------------------------------------------------------------------------------------------------------
+!---------------------------------------------------------------------------------------------------------------------------------------------------
+! Alternate Solution Script
+! To force the taps to be same as published results, set the transformer taps manually and disable the controls
+!---------------------------------------------------------------------------------------------------------------------------------------------------
+!Transformer.Reg1.Taps=[1.0 1.0625]
+!Transformer.Reg2.Taps=[1.0 1.0500]
+!Transformer.Reg3.Taps=[1.0 1.06875]
+!Set Controlmode=OFF
+
+
+// Line Codes
+
+New linecode.mtx601 nphases=3 BaseFreq=60 
+~ rmatrix = (0.3465 | 0.1560 0.3375 | 0.1580 0.1535 0.3414 ) 
+~ xmatrix = (1.0179 | 0.5017 1.0478 | 0.4236 0.3849 1.0348 ) 
+~ units=mi 
+New linecode.mtx602 nphases=3 BaseFreq=60 
+~ rmatrix = (0.7526 | 0.1580 0.7475 | 0.1560 0.1535 0.7436 ) 
+~ xmatrix = (1.1814 | 0.4236 1.1983 | 0.5017 0.3849 1.2112 ) 
+~ units=mi 
+New linecode.mtx603 nphases=2 BaseFreq=60 
+~ rmatrix = (1.3238 | 0.2066 1.3294 ) 
+~ xmatrix = (1.3569 | 0.4591 1.3471 ) 
+~ units=mi 
+New linecode.mtx604 nphases=2 BaseFreq=60 
+~ rmatrix = (1.3238 | 0.2066 1.3294 ) 
+~ xmatrix = (1.3569 | 0.4591 1.3471 ) 
+~ units=mi 
+New linecode.mtx605 nphases=1 BaseFreq=60 
+~ rmatrix = (1.3292 ) 
+~ xmatrix = (1.3475 ) 
+~ units=mi 
+
+New Linecode.mtx606 nphases=3  Units=mi
+~ Rmatrix=[0.791721  |0.318476  0.781649  |0.28345  0.318476  0.791721  ]
+~ Xmatrix=[0.438352  |0.0276838  0.396697  |-0.0184204  0.0276838  0.438352  ]
+~ Cmatrix=[383.948  |0  383.948  |0  0  383.948  ]
+
+New linecode.mtx607 nphases=1 BaseFreq=60 
+~ rmatrix = (1.3425 ) 
+~ xmatrix = (0.5124 )
+~ cmatrix = [236] 
+~ units=mi 
+
+! Line codes for the lateral lines
+! 2 parallel 150mm2 3phase cables (AL/XLPE)
+New Linecode.mtx3ph nphases=3  Units=km
+~ Rmatrix=[0.114  |0.0228  0.114  |0.0228  0.0228  0.114  ]
+~ Xmatrix=[0.0359  |0.0072  0.0359  |0.0072  0.0072  0.0359  ]
+
+! 2 parallel 120mm2 1phase cables (AL/XLPE)
+New linecode.mtx1ph nphases=1 BaseFreq=60 
+~ rmatrix = (0.14 ) 
+~ xmatrix = (0.0357 )
+~ units=km 
+
+!Bus 670 is the concentrated point load of the distributed load on line 632 to 671 located at 1/3 the distance from node 632
+
+!LINE DEFINITIONS 
+New Line.650632    Phases=3 Bus1=RG60.1.2.3   Bus2=632.1.2.3  LineCode=mtx601 Length=2000 units=ft 
+New Line.632670    Phases=3 Bus1=632.1.2.3    Bus2=670.1.2.3  LineCode=mtx601 Length=667  units=ft    
+New Line.670671    Phases=3 Bus1=670.1.2.3    Bus2=671.1.2.3  LineCode=mtx601 Length=1333 units=ft 
+New Line.671680    Phases=3 Bus1=671.1.2.3    Bus2=680.1.2.3  LineCode=mtx601 Length=1000 units=ft 
+New Line.632633    Phases=3 Bus1=632.1.2.3    Bus2=633.1.2.3  LineCode=mtx602 Length=500  units=ft 
+New Line.632645    Phases=2 Bus1=632.3.2      Bus2=645.3.2    LineCode=mtx603 Length=500  units=ft 
+New Line.645646    Phases=2 Bus1=645.3.2      Bus2=646.3.2    LineCode=mtx603 Length=300  units=ft 
+New Line.692675    Phases=3 Bus1=692.1.2.3    Bus2=675.1.2.3  LineCode=mtx606 Length=500  units=ft 
+New Line.671684    Phases=2 Bus1=671.1.3      Bus2=684.1.3    LineCode=mtx604 Length=300  units=ft 
+New Line.684611    Phases=1 Bus1=684.3        Bus2=611.3      LineCode=mtx605 Length=300  units=ft 
+New Line.684652    Phases=1 Bus1=684.1        Bus2=652.1      LineCode=mtx607 Length=800  units=ft 
+
+
+!SWITCH DEFINITIONS 
+//New Line.671692    Phases=3 Bus1=671   Bus2=692  Switch=y  r1=1e-4 r0=1e-4 x1=0.000 x0=0.000 c1=0.000 c0=0.000
+
+! Mod Darlene Dullius
+New Line.671692    Phases=3 Bus1=671   Bus2=692  LineCode=mtx607 Length=500  units=ft  */
+!TRANSFORMER DEFINITION 
+
+! THREE PHASE XFMR
+
+! This one already exists in the original system, I just changed the name to XFM01
+! and changed bus 634 name to B010.
+New Transformer.XFM01  Phases=3   Windings=2  XHL=2
+~ wdg=1 bus=633       conn=Wye kv=4.16    kva=500    %r=.55     XHT=1
+~ wdg=2 bus=B010       conn=Wye kv=0.480    kva=500    %r=.55   XLT=1
+
+New Transformer.XFM02  Phases=3   Windings=2  XHL=2
+~ wdg=1 bus=675       conn=Wye kv=4.16    kva=500    %r=.55     XHT=1
+~ wdg=2 bus=B020       conn=Wye kv=0.480    kva=500    %r=.55   XLT=1
+
+New Transformer.XFM03  Phases=3   Windings=2  XHL=2
+~ wdg=1 bus=675       conn=Wye kv=4.16    kva=500    %r=.55     XHT=1
+~ wdg=2 bus=B030       conn=Wye kv=0.480    kva=500    %r=.55   XLT=1
+
+New Transformer.XFM04  Phases=3   Windings=2  XHL=2
+~ wdg=1 bus=680       conn=Wye kv=4.16    kva=500    %r=.55     XHT=1
+~ wdg=2 bus=B040       conn=Wye kv=0.480    kva=500    %r=.55   XLT=1
+
+New Transformer.XFM05  Phases=3   Windings=2  XHL=2
+~ wdg=1 bus=671       conn=Wye kv=4.16    kva=500    %r=.55     XHT=1
+~ wdg=2 bus=B050       conn=Wye kv=0.480    kva=500    %r=.55   XLT=1
+
+
+! SINGLE PHASE XFMR
+
+New Transformer.XFM06  Phases=1   Windings=2  XHL=2
+~ wdg=1 bus=692.1        kv=2.4    kva=150    %r=.55     XHT=1
+~ wdg=2 bus=B060.1       kv=0.277    kva=150    %r=.55   XLT=1
+
+New Transformer.XFM07  Phases=1   Windings=2  XHL=2
+~ wdg=1 bus=652.1        kv=2.4    kva=150    %r=.55     XHT=1
+~ wdg=2 bus=B070.1       kv=0.277    kva=150    %r=.55   XLT=1
+
+New Transformer.XFM08  Phases=1   Windings=2  XHL=2
+~ wdg=1 bus=611.3        kv=2.4    kva=150    %r=.55     XHT=1
+~ wdg=2 bus=B080.3       kv=0.277    kva=150    %r=.55   XLT=1
+
+New Transformer.XFM09  Phases=1   Windings=2  XHL=2
+~ wdg=1 bus=646.2        kv=2.4    kva=150    %r=.55     XHT=1
+~ wdg=2 bus=B090.2       kv=0.277    kva=150    %r=.55   XLT=1
+
+New Transformer.XFM10  Phases=1   Windings=2  XHL=2
+~ wdg=1 bus=646.3        kv=2.4    kva=150    %r=.55     XHT=1
+~ wdg=2 bus=B100.3       kv=0.277    kva=150    %r=.55   XLT=1
+
+New Transformer.XFM11  Phases=1   Windings=2  XHL=2
+~ wdg=1 bus=645.2        kv=2.4    kva=150    %r=.55     XHT=1
+~ wdg=2 bus=B110.2       kv=0.277    kva=150    %r=.55   XLT=1
+
+
+!LINE DEFINITIONS 
+! Lateral 01
+New Line.ln011		Phases=3	Bus1=B010.1.2.3	Bus2=B011.1.2.3 LineCode=mtx3ph	Length=0.05	units=km
+New Line.ln012		Phases=3	Bus1=B011.1.2.3	Bus2=B012.1.2.3 LineCode=mtx3ph	Length=0.05	units=km
+New Line.ln013		Phases=3	Bus1=B012.1.2.3	Bus2=B013.1.2.3 LineCode=mtx3ph	Length=0.05	units=km
+New Line.ln014		Phases=3	Bus1=B013.1.2.3	Bus2=B014.1.2.3 LineCode=mtx3ph	Length=0.05	units=km
+
+! Lateral 02
+New Line.ln021		Phases=3	Bus1=B020.1.2.3	Bus2=B021.1.2.3 LineCode=mtx3ph	Length=0.05	units=km
+New Line.ln022		Phases=3	Bus1=B021.1.2.3	Bus2=B022.1.2.3 LineCode=mtx3ph	Length=0.05	units=km
+New Line.ln023		Phases=3	Bus1=B022.1.2.3	Bus2=B023.1.2.3 LineCode=mtx3ph	Length=0.05	units=km
+New Line.ln024		Phases=3	Bus1=B023.1.2.3	Bus2=B024.1.2.3 LineCode=mtx3ph	Length=0.05	units=km
+
+! Lateral 03
+New Line.ln031		Phases=3	Bus1=B030.1.2.3	Bus2=B031.1.2.3 LineCode=mtx3ph	Length=0.05	units=km
+New Line.ln032		Phases=3	Bus1=B031.1.2.3	Bus2=B032.1.2.3 LineCode=mtx3ph	Length=0.05	units=km
+New Line.ln033		Phases=3	Bus1=B032.1.2.3	Bus2=B033.1.2.3 LineCode=mtx3ph	Length=0.05	units=km
+New Line.ln034		Phases=3	Bus1=B033.1.2.3	Bus2=B034.1.2.3 LineCode=mtx3ph	Length=0.05	units=km
+
+! Lateral 04
+New Line.ln041		Phases=3	Bus1=B040.1.2.3	Bus2=B041.1.2.3 LineCode=mtx3ph	Length=0.05	units=km
+New Line.ln042		Phases=3	Bus1=B041.1.2.3	Bus2=B042.1.2.3 LineCode=mtx3ph	Length=0.05	units=km
+New Line.ln043		Phases=3	Bus1=B042.1.2.3	Bus2=B043.1.2.3 LineCode=mtx3ph	Length=0.05	units=km
+New Line.ln044		Phases=3	Bus1=B043.1.2.3	Bus2=B044.1.2.3 LineCode=mtx3ph	Length=0.05	units=km
+
+! Lateral 05
+New Line.ln051		Phases=3	Bus1=B050.1.2.3	Bus2=B051.1.2.3 LineCode=mtx3ph	Length=0.05	units=km
+New Line.ln052		Phases=3	Bus1=B051.1.2.3	Bus2=B052.1.2.3 LineCode=mtx3ph	Length=0.05	units=km
+New Line.ln053		Phases=3	Bus1=B052.1.2.3	Bus2=B053.1.2.3 LineCode=mtx3ph	Length=0.05	units=km
+New Line.ln054		Phases=3	Bus1=B053.1.2.3	Bus2=B054.1.2.3 LineCode=mtx3ph	Length=0.05	units=km
+
+! Lateral 06
+New Line.ln061		Phases=1	Bus1=B060.1	Bus2=B061.1 LineCode=mtx1ph	Length=0.05	units=km
+New Line.ln062		Phases=1	Bus1=B061.1	Bus2=B062.1 LineCode=mtx1ph	Length=0.05	units=km
+New Line.ln063		Phases=1	Bus1=B062.1	Bus2=B063.1 LineCode=mtx1ph	Length=0.05	units=km
+New Line.ln064		Phases=1	Bus1=B063.1	Bus2=B064.1 LineCode=mtx1ph	Length=0.05	units=km
+
+! Lateral 07
+New Line.ln071		Phases=1	Bus1=B070.1	Bus2=B071.1 LineCode=mtx1ph	Length=0.05	units=km
+New Line.ln072		Phases=1	Bus1=B071.1	Bus2=B072.1 LineCode=mtx1ph	Length=0.05	units=km
+New Line.ln073		Phases=1	Bus1=B072.1	Bus2=B073.1 LineCode=mtx1ph	Length=0.05	units=km
+New Line.ln074		Phases=1	Bus1=B073.1	Bus2=B074.1 LineCode=mtx1ph	Length=0.05	units=km
+
+! Lateral 08
+New Line.ln081		Phases=1	Bus1=B080.3	Bus2=B081.3 LineCode=mtx1ph	Length=0.05	units=km
+New Line.ln082		Phases=1	Bus1=B081.3	Bus2=B082.3 LineCode=mtx1ph	Length=0.05	units=km
+New Line.ln083		Phases=1	Bus1=B082.3	Bus2=B083.3 LineCode=mtx1ph	Length=0.05	units=km
+New Line.ln084		Phases=1	Bus1=B083.3	Bus2=B084.3 LineCode=mtx1ph	Length=0.05	units=km
+
+! Lateral 09
+New Line.ln091		Phases=1	Bus1=B090.2	Bus2=B091.2 LineCode=mtx1ph	Length=0.05	units=km
+New Line.ln092		Phases=1	Bus1=B091.2	Bus2=B092.2 LineCode=mtx1ph	Length=0.05	units=km
+New Line.ln093		Phases=1	Bus1=B092.2	Bus2=B093.2 LineCode=mtx1ph	Length=0.05	units=km
+New Line.ln094		Phases=1	Bus1=B093.2	Bus2=B094.2 LineCode=mtx1ph	Length=0.05	units=km
+
+! Lateral 10
+New Line.ln101		Phases=1	Bus1=B100.3	Bus2=B101.3 LineCode=mtx1ph	Length=0.05	units=km
+New Line.ln102		Phases=1	Bus1=B101.3	Bus2=B102.3 LineCode=mtx1ph	Length=0.05	units=km
+New Line.ln103		Phases=1	Bus1=B102.3	Bus2=B103.3 LineCode=mtx1ph	Length=0.05	units=km
+New Line.ln104		Phases=1	Bus1=B103.3	Bus2=B104.3 LineCode=mtx1ph	Length=0.05	units=km
+
+! Lateral 11
+New Line.ln111		Phases=1	Bus1=B110.2	Bus2=B111.2 LineCode=mtx1ph	Length=0.05	units=km
+New Line.ln112		Phases=1	Bus1=B111.2	Bus2=B112.2 LineCode=mtx1ph	Length=0.05	units=km
+New Line.ln113		Phases=1	Bus1=B112.2	Bus2=B113.2 LineCode=mtx1ph	Length=0.05	units=km
+New Line.ln114		Phases=1	Bus1=B113.2	Bus2=B114.2 LineCode=mtx1ph	Length=0.05	units=km
+
+
+! ====================================================================
+! LateralsLoads.dss
+! Arquivo gerado automaticamente via Python
+! Cargas nas barras laterais do modelo IEEE13_v1
+! Cada lateral associada a um LoadShape diário (LoadShapes-2min)
+! ====================================================================
+
+!LOAD DEFINITIONS 
+New Load.671 Bus1=671.1.2.3  Phases=3 Conn=Delta Model=1 kV=4.16   kW=1155 kvar=660 model=1 class=1 daily=demand_bloque_L_1				status=variable
+New Load.634a Bus1=634.1     Phases=1 Conn=Wye  Model=1 kV=0.277  kW=160   kvar=110 model=1 class=1 daily=demand_bloque_L_1				status=variable
+New Load.634b Bus1=634.2     Phases=1 Conn=Wye  Model=1 kV=0.277  kW=120   kvar=90 model=1 class=1 daily=demand_bloque_L_1				status=variable
+New Load.634c Bus1=634.3     Phases=1 Conn=Wye  Model=1 kV=0.277  kW=120   kvar=90 model=1 class=1 daily=demand_bloque_L_1				status=variable
+New Load.645 Bus1=645.2       Phases=1 Conn=Wye  Model=1 kV=2.4      kW=170   kvar=125 model=1 class=1 daily=demand_bloque_L_1				status=variable
+New Load.646 Bus1=646.2.3    Phases=1 Conn=Delta Model=2 kV=4.16    kW=230   kvar=132 model=1 class=1 daily=demand_bloque_L_1				status=variable
+New Load.692 Bus1=692.3.1    Phases=1 Conn=Delta Model=5 kV=4.16    kW=170   kvar=151 model=1 class=1 daily=demand_bloque_L_1				status=variable
+New Load.675a Bus1=675.1    Phases=1 Conn=Wye  Model=1 kV=2.4  kW=485   kvar=190 model=1 class=1 daily=demand_bloque_L_1				status=variable
+New Load.675b Bus1=675.2    Phases=1 Conn=Wye  Model=1 kV=2.4  kW=68   kvar=60 model=1 class=1 daily=demand_bloque_L_1				status=variable
+New Load.675c Bus1=675.3    Phases=1 Conn=Wye  Model=1 kV=2.4  kW=290   kvar=212 model=1 class=1 daily=demand_bloque_L_1				status=variable
+New Load.611 Bus1=611.3      Phases=1 Conn=Wye  Model=5 kV=2.4  kW=170   kvar=80 model=1 class=1 daily=demand_bloque_L_1				status=variable
+New Load.652 Bus1=652.1      Phases=1 Conn=Wye  Model=2 kV=2.4  kW=128   kvar=86 model=1 class=1 daily=demand_bloque_L_1				status=variable
+New Load.670a Bus1=670.1    Phases=1 Conn=Wye  Model=1 kV=2.4  kW=17    kvar=10 model=1 class=1 daily=demand_bloque_L_1				status=variable
+New Load.670b Bus1=670.2    Phases=1 Conn=Wye  Model=1 kV=2.4  kW=66    kvar=38 model=1 class=1 daily=demand_bloque_L_1				status=variable
+New Load.670c Bus1=670.3    Phases=1 Conn=Wye  Model=1 kV=2.4  kW=117  kvar=68 model=1 class=1 daily=demand_bloque_L_1				status=variable
+
+
+
+
+/* New LoadShape.profile1 npts=720 interval=1 csvfile=profile1.txt
+New LoadShape.profile6 npts=720 interval=1 csvfile=profile6.txt
+New LoadShape.profile10 npts=720 interval=1 csvfile=profile10.txt
+New LoadShape.profile4 npts=720 interval=1 csvfile=profile4.txt
+New LoadShape.profile5 npts=720 interval=1 csvfile=profile5.txt */
+
+// Modificações Darlene Dullius 25/11
+new loadshape.demand_bloque_A_Torre_I		npts=2880 interval=1.0 PQCSVfile=demand_bloque_A_Torre_I.txt action=normalize !Pmax=1400 Qmax=100
+new loadshape.demand_bloque_A_Torre_II		npts=2880 interval=1.0 PQCSVfile=demand_bloque_A_Torre_II.txt action=normalize !Pmax=1400 Qmax=100
+new loadshape.demand_bloque_A_Torre_III		npts=2880 interval=1.0 PQCSVfile=demand_bloque_A_Torre_III.txt action=normalize !Pmax=1400 Qmax=100
+new loadshape.demand_bloque_CT_Infra		npts=2880 interval=1.0 PQCSVfile=demand_bloque_CT_Infra.txt action=normalize !Pmax=1400 Qmax=100
+new loadshape.demand_bloque_B_K				npts=2880 interval=1.0 PQCSVfile=demand_bloque_B_K.txt action=normalize !Pmax=1400 Qmax=100
+new loadshape.demand_bloque_C_D				npts=2880 interval=1.0 PQCSVfile=demand_bloque_C_D.txt action=normalize !Pmax=1400 Qmax=100
+new loadshape.demand_bloque_E_F				npts=2880 interval=1.0 PQCSVfile=demand_bloque_E_F.txt action=normalize !Pmax=1400 Qmax=100
+new loadshape.demand_bloque_L_1				npts=2880 interval=1.0 PQCSVfile=demand_bloque_L_1.txt action=normalize !Pmax=1400 Qmax=100
+new loadshape.demand_bloque_L_2				npts=2880 interval=1.0 PQCSVfile=demand_bloque_L_2.txt action=normalize !Pmax=1400 Qmax=100
+new loadshape.demand_bloque_L_3				npts=2880 interval=1.0 PQCSVfile=demand_bloque_L_3.txt action=normalize !Pmax=1400 Qmax=100
+new loadshape.demand_bloque_Data_Center		npts=2880 interval=1.0 PQCSVfile=demand_bloque_Data_Center.txt action=normalize !Pmax=1400 Qmax=100
+new loadshape.demand_bloque_Ar_Condicionado	npts=2880 interval=1.0 PQCSVfile=demand_bloque_Ar_Condicionado.txt action=normalize !Pmax=1400 Qmax=100
+! ----------------------------------------------------------------
+! Lateral 01 - trifásica (perfil: profile1)
+! ----------------------------------------------------------------
+New Load.L01_01 Bus1=B011.1.2.3 Phases=3 Conn=Wye Model=1 kV=0.48 kW=100.0 kvar=30.0 class=1 daily=demand_bloque_A_Torre_I status=variable
+New Load.L01_02 Bus1=B012.1.2.3 Phases=3 Conn=Wye Model=1 kV=0.48 kW=100.0 kvar=30.0 class=1 daily=demand_bloque_A_Torre_I status=variable
+New Load.L01_03 Bus1=B013.1.2.3 Phases=3 Conn=Wye Model=1 kV=0.48 kW=100.0 kvar=30.0 class=1 daily=demand_bloque_A_Torre_I status=variable
+New Load.L01_04 Bus1=B014.1.2.3 Phases=3 Conn=Wye Model=1 kV=0.48 kW=100.0 kvar=30.0 class=1 daily=demand_bloque_A_Torre_I status=variable
+
+! ----------------------------------------------------------------
+! Lateral 02 - trifásica (perfil: profile6)
+! ----------------------------------------------------------------
+New Load.L02_01 Bus1=B021.1.2.3 Phases=3 Conn=Wye Model=1 kV=0.48 kW=100.0 kvar=30.0 class=1 daily=demand_bloque_A_Torre_II status=variable
+New Load.L02_02 Bus1=B022.1.2.3 Phases=3 Conn=Wye Model=1 kV=0.48 kW=100.0 kvar=30.0 class=1 daily=demand_bloque_A_Torre_II status=variable
+New Load.L02_03 Bus1=B023.1.2.3 Phases=3 Conn=Wye Model=1 kV=0.48 kW=100.0 kvar=30.0 class=1 daily=demand_bloque_A_Torre_II status=variable
+New Load.L02_04 Bus1=B024.1.2.3 Phases=3 Conn=Wye Model=1 kV=0.48 kW=100.0 kvar=30.0 class=1 daily=demand_bloque_A_Torre_II status=variable
+
+! ----------------------------------------------------------------
+! Lateral 03 - trifásica (perfil: profile10)
+! ----------------------------------------------------------------
+New Load.L03_01 Bus1=B031.1.2.3 Phases=3 Conn=Wye Model=1 kV=0.48 kW=100.0 kvar=30.0 class=1 daily=demand_bloque_A_Torre_III status=variable
+New Load.L03_02 Bus1=B032.1.2.3 Phases=3 Conn=Wye Model=1 kV=0.48 kW=100.0 kvar=30.0 class=1 daily=demand_bloque_A_Torre_III status=variable
+New Load.L03_03 Bus1=B033.1.2.3 Phases=3 Conn=Wye Model=1 kV=0.48 kW=100.0 kvar=30.0 class=1 daily=demand_bloque_A_Torre_III status=variable
+New Load.L03_04 Bus1=B034.1.2.3 Phases=3 Conn=Wye Model=1 kV=0.48 kW=100.0 kvar=30.0 class=1 daily=demand_bloque_A_Torre_III status=variable
+
+! ----------------------------------------------------------------
+! Lateral 04 - trifásica (perfil: profile4)
+! ----------------------------------------------------------------
+New Load.L04_01 Bus1=B041.1.2.3 Phases=3 Conn=Wye Model=1 kV=0.48 kW=100.0 kvar=30.0 class=1 daily=demand_bloque_CT_Infra status=variable
+New Load.L04_02 Bus1=B042.1.2.3 Phases=3 Conn=Wye Model=1 kV=0.48 kW=100.0 kvar=30.0 class=1 daily=demand_bloque_CT_Infra status=variable
+New Load.L04_03 Bus1=B043.1.2.3 Phases=3 Conn=Wye Model=1 kV=0.48 kW=100.0 kvar=30.0 class=1 daily=demand_bloque_CT_Infra status=variable
+New Load.L04_04 Bus1=B044.1.2.3 Phases=3 Conn=Wye Model=1 kV=0.48 kW=100.0 kvar=30.0 class=1 daily=demand_bloque_CT_Infra status=variable
+
+! ----------------------------------------------------------------
+! Lateral 05 - trifásica (perfil: profile5)
+! ----------------------------------------------------------------
+New Load.L05_01 Bus1=B051.1.2.3 Phases=3 Conn=Wye Model=1 kV=0.48 kW=100.0 kvar=30.0 class=1 daily=demand_bloque_B_K status=variable
+New Load.L05_02 Bus1=B052.1.2.3 Phases=3 Conn=Wye Model=1 kV=0.48 kW=100.0 kvar=30.0 class=1 daily=demand_bloque_B_K status=variable
+New Load.L05_03 Bus1=B053.1.2.3 Phases=3 Conn=Wye Model=1 kV=0.48 kW=100.0 kvar=30.0 class=1 daily=demand_bloque_B_K status=variable
+New Load.L05_04 Bus1=B054.1.2.3 Phases=3 Conn=Wye Model=1 kV=0.48 kW=100.0 kvar=30.0 class=1 daily=demand_bloque_B_K status=variable
+
+! ----------------------------------------------------------------
+! Lateral 06 - monofásica (perfil: profile1)
+! ----------------------------------------------------------------
+New Load.L06_01 Bus1=B061.1 Phases=1 Conn=Wye Model=1 kV=0.277 kW=30.0 kvar=9.0 class=1 daily=demand_bloque_C_D status=variable
+New Load.L06_02 Bus1=B062.1 Phases=1 Conn=Wye Model=1 kV=0.277 kW=30.0 kvar=9.0 class=1 daily=demand_bloque_C_D status=variable
+New Load.L06_03 Bus1=B063.1 Phases=1 Conn=Wye Model=1 kV=0.277 kW=30.0 kvar=9.0 class=1 daily=demand_bloque_C_D status=variable
+New Load.L06_04 Bus1=B064.1 Phases=1 Conn=Wye Model=1 kV=0.277 kW=30.0 kvar=9.0 class=1 daily=demand_bloque_C_D status=variable
+
+! ----------------------------------------------------------------
+! Lateral 07 - monofásica (perfil: profile6)
+! ----------------------------------------------------------------
+New Load.L07_01 Bus1=B071.1 Phases=1 Conn=Wye Model=1 kV=0.277 kW=30.0 kvar=9.0 class=1 daily=demand_bloque_Data_Center status=variable
+New Load.L07_02 Bus1=B072.1 Phases=1 Conn=Wye Model=1 kV=0.277 kW=30.0 kvar=9.0 class=1 daily=demand_bloque_Data_Center status=variable
+New Load.L07_03 Bus1=B073.1 Phases=1 Conn=Wye Model=1 kV=0.277 kW=30.0 kvar=9.0 class=1 daily=demand_bloque_Data_Center status=variable
+New Load.L07_04 Bus1=B074.1 Phases=1 Conn=Wye Model=1 kV=0.277 kW=30.0 kvar=9.0 class=1 daily=demand_bloque_Data_Center status=variable
+
+! ----------------------------------------------------------------
+! Lateral 08 - monofásica (perfil: profile10)
+! ----------------------------------------------------------------
+New Load.L08_01 Bus1=B081.3 Phases=1 Conn=Wye Model=1 kV=0.277 kW=30.0 kvar=9.0 class=1 daily=demand_bloque_E_F status=variable
+New Load.L08_02 Bus1=B082.3 Phases=1 Conn=Wye Model=1 kV=0.277 kW=30.0 kvar=9.0 class=1 daily=demand_bloque_E_F status=variable
+New Load.L08_03 Bus1=B083.3 Phases=1 Conn=Wye Model=1 kV=0.277 kW=30.0 kvar=9.0 class=1 daily=demand_bloque_E_F status=variable
+New Load.L08_04 Bus1=B084.3 Phases=1 Conn=Wye Model=1 kV=0.277 kW=30.0 kvar=9.0 class=1 daily=demand_bloque_E_F status=variable
+
+! ----------------------------------------------------------------
+! Lateral 09 - monofásica (perfil: profile4)
+! ----------------------------------------------------------------
+New Load.L09_01 Bus1=B091.2 Phases=1 Conn=Wye Model=1 kV=0.277 kW=30.0 kvar=9.0 class=1 daily=demand_bloque_L_1 status=variable
+New Load.L09_02 Bus1=B092.2 Phases=1 Conn=Wye Model=1 kV=0.277 kW=30.0 kvar=9.0 class=1 daily=demand_bloque_L_1 status=variable
+New Load.L09_03 Bus1=B093.2 Phases=1 Conn=Wye Model=1 kV=0.277 kW=30.0 kvar=9.0 class=1 daily=demand_bloque_L_1 status=variable
+New Load.L09_04 Bus1=B094.2 Phases=1 Conn=Wye Model=1 kV=0.277 kW=30.0 kvar=9.0 class=1 daily=demand_bloque_L_1 status=variable
+
+! ----------------------------------------------------------------
+! Lateral 10 - monofásica (perfil: profile5)
+! ----------------------------------------------------------------
+New Load.L10_01 Bus1=B101.3 Phases=1 Conn=Wye Model=1 kV=0.277 kW=30.0 kvar=9.0 class=1 daily=demand_bloque_L_3 status=variable
+New Load.L10_02 Bus1=B102.3 Phases=1 Conn=Wye Model=1 kV=0.277 kW=30.0 kvar=9.0 class=1 daily=demand_bloque_L_3 status=variable
+New Load.L10_03 Bus1=B103.3 Phases=1 Conn=Wye Model=1 kV=0.277 kW=30.0 kvar=9.0 class=1 daily=demand_bloque_L_3 status=variable
+New Load.L10_04 Bus1=B104.3 Phases=1 Conn=Wye Model=1 kV=0.277 kW=30.0 kvar=9.0 class=1 daily=demand_bloque_L_3 status=variable
+
+! ----------------------------------------------------------------
+! Lateral 11 - monofásica (perfil: profile1)
+! ----------------------------------------------------------------
+New Load.L11_01 Bus1=B111.2 Phases=1 Conn=Wye Model=1 kV=0.277 kW=30.0 kvar=9.0 class=1 daily=demand_bloque_L_2 status=variable
+New Load.L11_02 Bus1=B112.2 Phases=1 Conn=Wye Model=1 kV=0.277 kW=30.0 kvar=9.0 class=1 daily=demand_bloque_L_2 status=variable
+New Load.L11_03 Bus1=B113.2 Phases=1 Conn=Wye Model=1 kV=0.277 kW=30.0 kvar=9.0 class=1 daily=demand_bloque_L_2 status=variable
+New Load.L11_04 Bus1=B114.2 Phases=1 Conn=Wye Model=1 kV=0.277 kW=30.0 kvar=9.0 class=1 daily=demand_bloque_L_2 status=variable
+
+
+
+//Redirect LateralsPVs2.dss	! sem fator de potencia declarado
+//Redirect LateralsPVs2_fp.dss ! com fator de potencia	unitario
+//Redirect LateralsPVv3.dss ! com as linhas ficticias p/monitor fp unitario 
+//Redirect LateralsPVs2_FPAv2.dss	! com fator de potencia sugerido por FPA
+
+
+/* !PV DEFINITIONS 
+
+New XYCurve.Eff npts=4 xarray=[.1 .2 .4 1.0] yarray=[1 1 1 1]
+New XYCurve.FatorPvsT npts=4 xarray=[0 25 75 100] yarray=[1 1 1 1] 
+New Tshape.Temp npts=24 interval=1 
+~ temp=[25 25 25 25 25 25 25 25 25 25 25 25 25 25 25 25 25 25 25 25 25 25 25 25]
+
+New Loadshape.Irprf1 npts=24 interval=1 mult=[1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1]
+New Loadshape.Irprf2 npts=24 interval=1 mult=[1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1]
+New Loadshape.Irprf3 npts=24 interval=1 mult=[1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1]
+ */
+ 
+ 
+ // Modificacoes Darlene 25-11
+// P-T curve is per unit of rated Pmpp vs temperature
+// This one is for a Pmpp stated at 25 deg
+New XYCurve.MyPvsT 
+~ npts = 4  
+~ xarray = [0  25  75  100]
+~ yarray = [1.2 1.0 0.8  0.6] 
+
+// efficiency curve is per unit eff vs per unit power
+New XYCurve.MyEff 
+~ npts=4  
+~ xarray=[.1  .2  .4  1.0]  
+~ yarray=[.86  .9  .93  .97]  
+
+// per unit irradiance curve (per unit if "irradiance" property)
+New Loadshape.MyIrrad npts = 2880 interval = 1 mult = (file=irradiancia_2880.txt)
+
+// 24-hr temp shape curve
+New Tshape.Temp npts = 2880 interval = 1 temp = (file=temperatura_2880.txt)
+
+ 
+ 
+ ! 3-phase (all PVs are 100kW, inv=110kVA)
+! Lateral 01
+New PVSystem.PV011 phases=3 bus1=B011  kV=0.48 kVA=110 irrad = 0.98 Pmpp=100 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+New PVSystem.PV012 phases=3 bus1=B012 kV=0.48 kVA=110 irrad = 0.98 Pmpp=100 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+New PVSystem.PV013 phases=3 bus1=B013 kV=0.48 kVA=110 irrad = 0.98 Pmpp=100 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+New PVSystem.PV014 phases=3 bus1=B014 kV=0.48 kVA=110 irrad = 0.98 Pmpp=100 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+ ! Lateral 02
+New PVSystem.PV021 phases=3 bus1=B021  kV=0.48 kVA=110 irrad = 0.98 Pmpp=100 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+New PVSystem.PV022 phases=3 bus1=B022  kV=0.48 kVA=110 irrad = 0.98 Pmpp=100 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+New PVSystem.PV023 phases=3 bus1=B023 kV=0.48 kVA=110 irrad = 0.98 Pmpp=100 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+New PVSystem.PV024 phases=3 bus1=B024 kV=0.48 kVA=110 irrad = 0.98 Pmpp=100 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+
+! Lateral 03
+New PVSystem.PV031 phases=3 bus1=B031 kV=0.48 kVA=110 irrad = 0.98 Pmpp=100 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+New PVSystem.PV032 phases=3 bus1=B032 kV=0.48 kVA=110 irrad = 0.98 Pmpp=100 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+New PVSystem.PV033 phases=3 bus1=B033 kV=0.48 kVA=110 irrad = 0.98 Pmpp=100 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+New PVSystem.PV034 phases=3 bus1=B034 kV=0.48 kVA=110 irrad = 0.98 Pmpp=100 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+
+
+! Lateral 04
+New PVSystem.PV041 phases=3 bus1=B041 kV=0.48 kVA=110 irrad = 0.98 Pmpp=100 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+New PVSystem.PV042 phases=3 bus1=B042 kV=0.48 kVA=110 irrad = 0.98 Pmpp=100 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+New PVSystem.PV043 phases=3 bus1=B043 kV=0.48 kVA=110 irrad = 0.98 Pmpp=100 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+New PVSystem.PV044 phases=3 bus1=B044 kV=0.48 kVA=110 irrad = 0.98 Pmpp=100 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+
+
+! Lateral 05
+New PVSystem.PV051 phases=3 bus1=B051 kV=0.48 kVA=110 irrad = 0.98 Pmpp=100 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+New PVSystem.PV052 phases=3 bus1=B052 kV=0.48 kVA=110 irrad = 0.98 Pmpp=100 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+New PVSystem.PV053 phases=3 bus1=B053 kV=0.48 kVA=110 irrad = 0.98 Pmpp=100 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+New PVSystem.PV054 phases=3 bus1=B054 kV=0.48 kVA=110 irrad = 0.98 Pmpp=100 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+
+
+! 1-phase all PVs are 30kW, inv=33kVA)
+! Lateral 06
+New PVSystem.PV061 phases=1 bus1=B061.1 kV=0.277 kVA=33 Pmpp=30 irrad = 0.98 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+New PVSystem.PV062 phases=1 bus1=B062.1 kV=0.277 kVA=33 Pmpp=30 irrad = 0.98 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+New PVSystem.PV063 phases=1 bus1=B063.1 kV=0.277 kVA=33 Pmpp=30 irrad = 0.98 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+New PVSystem.PV064 phases=1 bus1=B064.1 kV=0.277 kVA=33 Pmpp=30 irrad = 0.98 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+
+! Lateral 07
+New PVSystem.PV071 phases=1 bus1=B071.1 kV=0.277 kVA=33 Pmpp=30 irrad = 0.98 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+New PVSystem.PV072 phases=1 bus1=B072.1 kV=0.277 kVA=33 Pmpp=30 irrad = 0.98 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+New PVSystem.PV073 phases=1 bus1=B073.1 kV=0.277 kVA=33 Pmpp=30 irrad = 0.98 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+New PVSystem.PV074 phases=1 bus1=B074.1 kV=0.277 kVA=33 Pmpp=30 irrad = 0.98 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+
+
+! Lateral 08
+New PVSystem.PV081 phases=1 bus1=B081.3 kV=0.277 kVA=33 Pmpp=30 irrad = 0.98 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+New PVSystem.PV082 phases=1 bus1=B082.3 kV=0.277 kVA=33 Pmpp=30 irrad = 0.98 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+New PVSystem.PV083 phases=1 bus1=B083.3 kV=0.277 kVA=33 Pmpp=30 irrad = 0.98 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+New PVSystem.PV084 phases=1 bus1=B084.3 kV=0.277 kVA=33 Pmpp=30 irrad = 0.98 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+
+
+
+! Lateral 09
+New PVSystem.PV091 phases=1 bus1=B091.2 kV=0.277 kVA=33 Pmpp=30 irrad = 0.98 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+New PVSystem.PV092 phases=1 bus1=B092.2 kV=0.277 kVA=33 Pmpp=30 irrad = 0.98 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+New PVSystem.PV093 phases=1 bus1=B093.2 Pmpp=30 kV=0.277 kVA=33 conn=wye effcurve=Eff kvar=0
+~ P-TCurve=FatorPvsT %Pmpp=100 kvarMax=14.5 kvarMaxAbs=14.5 irradiance=1 daily=MyIrrad Tdaily=Temp  %Cutin=1	%Cutout=1
+New PVSystem.PV094 phases=1 bus1=B094.2 kV=0.277 kVA=33 Pmpp=30 irrad = 0.98 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+
+
+! Lateral 10
+New PVSystem.PV101 phases=1 bus1=B101.3 kV=0.277 kVA=33 Pmpp=30 irrad = 0.98 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+New PVSystem.PV102 phases=1 bus1=B102.3 kV=0.277 kVA=33 Pmpp=30 irrad = 0.98 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+New PVSystem.PV103 phases=1 bus1=B103.3 kV=0.277 kVA=33 Pmpp=30 irrad = 0.98 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+New PVSystem.PV104 phases=1 bus1=B104.3 kV=0.277 kVA=33 Pmpp=30 irrad = 0.98 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+
+
+! Lateral 11
+New PVSystem.PV111 phases=1 bus1=B111.2 kV=0.277 kVA=33 Pmpp=30 irrad = 0.98 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+New PVSystem.PV112 phases=1 bus1=B112.2 kV=0.277 kVA=33 Pmpp=30 irrad = 0.98 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+New PVSystem.PV113 phases=1 bus1=B113.2 kV=0.277 kVA=33 Pmpp=30 irrad = 0.98 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+New PVSystem.PV114 phases=1 bus1=B114.2 kV=0.277 kVA=33 Pmpp=30 irrad = 0.98 temperature = 25 PF = 1 %cutin = 0.1 %cutout = 0.1 effcurve = Myeff P-TCurve = MyPvsT Daily = MyIrrad TDaily = Temp
+
+
+
+/* New PVSystem.PV011 phases=3 bus1=B011
+~ kV=0.48 kVA=110 Pmpp=100 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=45.8 kvarMaxAbs=45.8
+
+New PVSystem.PV012 phases=3 bus1=B012
+~ kV=0.48 kVA=110 Pmpp=100 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=45.8 kvarMaxAbs=45.8
+
+New PVSystem.PV013 phases=3 bus1=B013
+~ kV=0.48 kVA=110 Pmpp=100 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=45.8 kvarMaxAbs=45.8
+
+New PVSystem.PV014 phases=3 bus1=B014
+~ kV=0.48 kVA=110 Pmpp=100 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=45.8 kvarMaxAbs=45.8
+
+New PVSystem.PV021 phases=3 bus1=B021
+~ kV=0.48 kVA=110 Pmpp=100 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=45.8 kvarMaxAbs=45.8
+
+New PVSystem.PV022 phases=3 bus1=B022
+~ kV=0.48 kVA=110 Pmpp=100 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=45.8 kvarMaxAbs=45.8
+
+New PVSystem.PV023 phases=3 bus1=B023
+~ kV=0.48 kVA=110 Pmpp=100 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=45.8 kvarMaxAbs=45.8
+
+New PVSystem.PV024 phases=3 bus1=B024
+~ kV=0.48 kVA=110 Pmpp=100 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=45.8 kvarMaxAbs=45.8
+
+New PVSystem.PV031 phases=3 bus1=B031
+~ kV=0.48 kVA=110 Pmpp=100 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=45.8 kvarMaxAbs=45.8
+
+New PVSystem.PV032 phases=3 bus1=B032
+~ kV=0.48 kVA=110 Pmpp=100 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=45.8 kvarMaxAbs=45.8
+
+New PVSystem.PV033 phases=3 bus1=B033
+~ kV=0.48 kVA=110 Pmpp=100 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=45.8 kvarMaxAbs=45.8
+
+New PVSystem.PV034 phases=3 bus1=B034
+~ kV=0.48 kVA=110 Pmpp=100 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=45.8 kvarMaxAbs=45.8
+
+New PVSystem.PV041 phases=3 bus1=B041
+~ kV=0.48 kVA=110 Pmpp=100 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=45.8 kvarMaxAbs=45.8
+
+New PVSystem.PV042 phases=3 bus1=B042
+~ kV=0.48 kVA=110 Pmpp=100 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=45.8 kvarMaxAbs=45.8
+
+New PVSystem.PV043 phases=3 bus1=B043
+~ kV=0.48 kVA=110 Pmpp=100 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=45.8 kvarMaxAbs=45.8
+
+New PVSystem.PV044 phases=3 bus1=B044
+~ kV=0.48 kVA=110 Pmpp=100 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=45.8 kvarMaxAbs=45.8
+
+New PVSystem.PV051 phases=3 bus1=B051
+~ kV=0.48 kVA=110 Pmpp=100 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=45.8 kvarMaxAbs=45.8
+
+New PVSystem.PV052 phases=3 bus1=B052
+~ kV=0.48 kVA=110 Pmpp=100 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=45.8 kvarMaxAbs=45.8
+
+New PVSystem.PV053 phases=3 bus1=B053
+~ kV=0.48 kVA=110 Pmpp=100 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=45.8 kvarMaxAbs=45.8
+
+New PVSystem.PV054 phases=3 bus1=B054
+~ kV=0.48 kVA=110 Pmpp=100 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=45.8 kvarMaxAbs=45.8
+
+New PVSystem.PV061 phases=1 bus1=B061.1
+~ kV=0.277 kVA=33 Pmpp=30 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=14.5 kvarMaxAbs=14.5
+
+New PVSystem.PV062 phases=1 bus1=B062.1
+~ kV=0.277 kVA=33 Pmpp=30 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=14.5 kvarMaxAbs=14.5
+
+New PVSystem.PV063 phases=1 bus1=B063.1
+~ kV=0.277 kVA=33 Pmpp=30 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=14.5 kvarMaxAbs=14.5
+
+New PVSystem.PV064 phases=1 bus1=B064.1
+~ kV=0.277 kVA=33 Pmpp=30 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=14.5 kvarMaxAbs=14.5
+
+New PVSystem.PV071 phases=1 bus1=B071.1
+~ kV=0.277 kVA=33 Pmpp=30 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=14.5 kvarMaxAbs=14.5
+
+New PVSystem.PV072 phases=1 bus1=B072.1
+~ kV=0.277 kVA=33 Pmpp=30 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=14.5 kvarMaxAbs=14.5
+
+New PVSystem.PV073 phases=1 bus1=B073.1
+~ kV=0.277 kVA=33 Pmpp=30 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=14.5 kvarMaxAbs=14.5
+
+New PVSystem.PV074 phases=1 bus1=B074.1
+~ kV=0.277 kVA=33 Pmpp=30 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=14.5 kvarMaxAbs=14.5
+
+New PVSystem.PV081 phases=1 bus1=B081.3
+~ kV=0.277 kVA=33 Pmpp=30 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=14.5 kvarMaxAbs=14.5
+
+New PVSystem.PV082 phases=1 bus1=B082.3
+~ kV=0.277 kVA=33 Pmpp=30 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=14.5 kvarMaxAbs=14.5
+
+New PVSystem.PV083 phases=1 bus1=B083.3
+~ kV=0.277 kVA=33 Pmpp=30 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=14.5 kvarMaxAbs=14.5
+
+New PVSystem.PV084 phases=1 bus1=B084.3
+~ kV=0.277 kVA=33 Pmpp=30 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=14.5 kvarMaxAbs=14.5
+
+New PVSystem.PV091 phases=1 bus1=B091.2
+~ kV=0.277 kVA=33 Pmpp=30 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=14.5 kvarMaxAbs=14.5
+
+New PVSystem.PV092 phases=1 bus1=B092.2
+~ kV=0.277 kVA=33 Pmpp=30 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=14.5 kvarMaxAbs=14.5
+
+New PVSystem.PV093 phases=1 bus1=B093.2
+~ kV=0.277 kVA=33 Pmpp=30 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=14.5 kvarMaxAbs=14.5
+
+New PVSystem.PV094 phases=1 bus1=B094.2
+~ kV=0.277 kVA=33 Pmpp=30 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=14.5 kvarMaxAbs=14.5
+
+New PVSystem.PV101 phases=1 bus1=B101.3
+~ kV=0.277 kVA=33 Pmpp=30 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=14.5 kvarMaxAbs=14.5
+
+New PVSystem.PV102 phases=1 bus1=B102.3
+~ kV=0.277 kVA=33 Pmpp=30 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=14.5 kvarMaxAbs=14.5
+
+New PVSystem.PV103 phases=1 bus1=B103.3
+~ kV=0.277 kVA=33 Pmpp=30 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=14.5 kvarMaxAbs=14.5
+
+New PVSystem.PV104 phases=1 bus1=B104.3
+~ kV=0.277 kVA=33 Pmpp=30 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=14.5 kvarMaxAbs=14.5
+
+New PVSystem.PV111 phases=1 bus1=B111.2
+~ kV=0.277 kVA=33 Pmpp=30 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=14.5 kvarMaxAbs=14.5
+
+New PVSystem.PV112 phases=1 bus1=B112.2
+~ kV=0.277 kVA=33 Pmpp=30 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=14.5 kvarMaxAbs=14.5
+
+New PVSystem.PV113 phases=1 bus1=B113.2
+~ kV=0.277 kVA=33 Pmpp=30 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=14.5 kvarMaxAbs=14.5
+
+New PVSystem.PV114 phases=1 bus1=B114.2
+~ kV=0.277 kVA=33 Pmpp=30 PF=1 irrad=0.98 temperature=25
+~ effcurve=MyEff P-TCurve=MyPvsT daily=MyIrrad Tdaily=Temp
+~ %cutin=0.1 %cutout=0.1 kvarMax=14.5 kvarMaxAbs=14.5
+ */
+
+
+//New energymeter.Emeter1 element=Transformer.Sub terminal=1
+New monitor.powers element=Transformer.Sub terminal=1 ppolar=no mode=1
+
+
+
+//Set Voltagebases=[115, 4.16, .48]
+//calcv
+//Solve
+BusCoords IEEE13NewBusXY.csv
+		
+
+!---------------------------------------------------------------------------------------------------------------------------------------------------
+!----------------Show some Results -----------------------------------------------------------------------------------------------------------------
+!---------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+
+
+
+
+// Show Voltages LN Nodes
+// Show Currents Elem
+// Show Powers kVA Elem
+// Show Losses
+// Show Taps
+Set MarkTransformers=yes
+! plot circuit power max=2000 subs=y dots=y labels=y C1=$00FF0000
+!Plot Profile Phases=all
+
