@@ -181,12 +181,35 @@ def _solve_two_stage(model, sets_info, timelimit1=TIMELIMIT_STAGE1,
         opt2, which2 = _get_solver()
         opts2 = {'timelimit': timelimit, 'mipgap': mipgap} if which2 == 'cplex' else {}
         t0 = time.time()
-        res2 = opt2.solve(model, tee=tee, options=opts2) if opts2 else \
-            opt2.solve(model, tee=tee)
+        # CORREÇÃO (bug real, achado por execução): load_solutions=False +
+        # checagem explícita de res2.solution ANTES de tocar no modelo.
+        # Antes, opt2.solve(model, ...) carregava automaticamente (ou,
+        # em infeasible, simplesmente NÃO atualizava nada, deixando as
+        # variáveis LIVRES — V, Qpv, P, Q, l_sq — com os valores do último
+        # solve bem-sucedido, que era o Estágio 1 (tap contínuo). Só
+        # tap_pos/u_tap mudavam (porque .fix()/.setlb()/.setub() alteram o
+        # valor na hora, independente de solve). Resultado: um band=0
+        # infeasible ainda "passava" em _solution_is_usable(), porque a
+        # checagem via V dentro dos limites só via os V's ANTIGOS do
+        # Estágio 1 — que continuam válidos por conta própria, mas não
+        # correspondem a NADA que tenha sido resolvido com o tap fixo atual.
+        # É exatamente o que aconteceu na sua última rodada: 'infeasible'
+        # com 'solução_utilizável=True' e F.O. de uma mistura inconsistente
+        # (tap do Estágio 2, tensão/Qpv do Estágio 1) — não um resultado
+        # real, e o pipeline seguiu extraindo política dele mesmo assim.
+        res2 = opt2.solve(model, tee=tee, load_solutions=False,
+                          options=opts2) if opts2 else \
+            opt2.solve(model, tee=tee, load_solutions=False)
         tc2 = str(res2.solver.termination_condition)
-        usable, obj_val = _solution_is_usable(model)
+        has_solution = len(res2.solution) > 0
+        if has_solution:
+            model.solutions.load_from(res2)
+            usable, obj_val = _solution_is_usable(model)
+        else:
+            usable, obj_val = False, None
         print(f"  Estágio 2 (|livres|={len(free_set)}): status={tc2} | "
-             f"{time.time()-t0:.1f}s | solução_utilizável={usable}"
+             f"{time.time()-t0:.1f}s | solver_devolveu_solução={has_solution} "
+             f"| solução_utilizável={usable}"
              f"{f' | F.O.={obj_val:.2f}' if obj_val is not None else ''}")
         return tc2, which2, usable
 
@@ -413,7 +436,8 @@ def export_diagnostics_json(model, data, sets_info, solve_meta, ops_by_phase,
         'classificacao': {g: len(v) for g, v in groups.items()},
         'FD_diagnostico': fd if isinstance(fd, dict) else str(fd),
         'pesos': {
-            'W_DV': core.W_DV, 'W_UNBAL': core.W_UNBAL, 'W_TAP': core.W_TAP,
+            'W_DV': core.W_DV, 'W_UNBAL': core.W_UNBAL,
+            'W_TAP_OPS': getattr(core, 'W_TAP_OPS', None),
             'W_Q_USE': getattr(core, 'W_Q_USE', None),
             'W_CURT': core.W_CURT, 'W_CORE': core.W_CORE,
         },
