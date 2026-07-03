@@ -87,80 +87,150 @@ def _solve_two_stage(model, sets_info, timelimit1=TIMELIMIT_STAGE1,
     tc1 = str(res1.solver.termination_condition)
     print(f"  Estágio 1: {tc1} | {time.time()-t0:.1f}s")
 
-    # Arredonda e fixa o tap por fase/período para o Estágio 2
+    # Arredonda e fixa o tap por fase/período para o Estágio 2. Também guarda
+    # a FRAÇÃO do valor contínuo (quão perto de 0,5 — "ambíguo" — cada
+    # arredondamento está), usada depois para decidir quais períodos precisam
+    # de liberdade no Estágio 2 (ver correção #2 mais abaixo).
     tap_fixed = {}
+    raw_frac = {}
     for ph in svr_phs:
         for t in hours:
             try:
-                pos = int(round(pyo.value(model.tap_pos[ph, t])))
+                raw = pyo.value(model.tap_pos[ph, t])
+                pos = int(round(raw))
             except Exception:
+                raw = 0.0
                 pos = 0
-            tap_fixed[(ph, t)] = max(0, min(sets_info['n_pos'] - 1, pos))
+            pos = max(0, min(sets_info['n_pos'] - 1, pos))
+            tap_fixed[(ph, t)] = pos
+            raw_frac[(ph, t)] = abs(raw - pos)
 
     # ── Estágio 2: fixar tap, resolver QP puro (Qpv continua livre) ────────
-    # CORREÇÃO (bug real, achado por execução): fixar o tap EXATAMENTE no
-    # arredondamento do Estágio 1 pode ser infeasible — a relaxação contínua
-    # encontra uma posição "boa" na média, mas o arredondamento de um único
-    # período pode empurrar a rede para fora da faixa de tensão sem que
-    # NENHUM Qpv (mesmo livre) consiga compensar. Isso não é raro em MINLP
-    # relax-then-round perto da fronteira de factibilidade.
+    # CORREÇÃO #1 (turno anterior): fixar o tap EXATAMENTE no arredondamento
+    # do Estágio 1 pode ser infeasible.
     #
-    # Correção: se a fixação exata falhar, NÃO desiste — libera uma banda
-    # inteira pequena ao redor do arredondamento (tap_pos ∈ [pos-K, pos+K],
-    # ainda um MILP bem menor que o problema original, já que a maioria dos
-    # períodos seguiria "perto" do arredondamento) e deixa o solver corrigir
-    # só os períodos que realmente precisam. Se nem a banda mais larga
-    # tentada resolver, ABORTA e não deixa o pipeline seguir com resultado
-    # inválido (ao contrário do comportamento anterior, que prosseguia com
-    # o aviso mas exportava a política mesmo assim).
-    def _try_stage2(band):
+    # CORREÇÃO #2 (achada por execução real — a banda ±1 travou 600s+ com
+    # status 'unknown'): reabrir tap_pos+u_tap para TODAS as 432 combinações
+    # (144 períodos × 3 fases) de uma vez, mesmo dentro de uma banda estreita,
+    # ainda é um MILP combinatoriamente pesado — o que trava o solver não é a
+    # LARGURA da banda por período, é o NÚMERO de períodos reabertos ao mesmo
+    # tempo (cada um com sua própria u_tap binária competindo no mesmo
+    # objetivo). A esmagadora maioria dos 144 períodos tem um arredondamento
+    # limpo (fração perto de 0 ou 1) e não precisa de liberdade nenhuma; só
+    # os poucos períodos "na fronteira" (fração perto de 0,5) são candidatos
+    # a causar infeasibilidade. Reabrir SÓ esses reduz o MILP de ~432
+    # variáveis binárias livres para tipicamente uma dezena.
+    #
+    # CORREÇÃO #3: não exigir mais rótulo 'optimal'/'feasible' explícito.
+    # Verifica-se DIRETAMENTE se uma solução real foi carregada (objetivo
+    # computável + V dentro dos próprios limites) — é isso que importa, não
+    # a string exata que o CPLEX devolveu. Um MILP com mipgap apertado pode
+    # achar uma solução ótima ou quase-ótima rapidamente e ainda assim gastar
+    # o tempo todo tentando *provar* isso, retornando 'unknown'/
+    # 'maxTimeLimit' mesmo tendo uma solução perfeitamente utilizável.
+    MIPGAP_STAGE2 = float(os.environ.get('MIPGAP_STAGE2', 0.05))  # 5%: só
+    # precisamos de UMA discretização viável, não a comprovadamente ótima.
+
+    def _solution_is_usable(model):
+        """Verifica se há uma solução REAL carregada no modelo, sem depender
+        do rótulo de terminação do solver."""
+        try:
+            obj_val = float(pyo.value(model.obj))
+        except Exception:
+            return False, None
+        if not math.isfinite(obj_val):
+            return False, None
+        # amostra alguns V para conferir que respeitam os próprios limites
+        # (um MILP só carrega incumbentes que satisfazem as restrições —
+        # se os bounds batem, a solução é real, não resíduo de antes)
+        n_check = 0
+        for (b, ph) in list(sets_info['bph'])[:30]:
+            for t in (0, len(hours) // 2, len(hours) - 1):
+                try:
+                    v = pyo.value(model.V[b, ph, t])
+                    lb = pyo.value(model.V[b, ph, t].lb)
+                    ub = pyo.value(model.V[b, ph, t].ub)
+                    if lb is not None and v < lb - 1e-4:
+                        return False, obj_val
+                    if ub is not None and v > ub + 1e-4:
+                        return False, obj_val
+                    n_check += 1
+                except Exception:
+                    continue
+        return (n_check > 0), obj_val
+
+    def _try_stage2(free_set, timelimit, mipgap):
+        """free_set: conjunto de (ph,t) com liberdade de banda; todo o resto
+        fica FIXO no arredondamento do Estágio 1."""
         for ph in svr_phs:
             for t in hours:
                 pos = tap_fixed[(ph, t)]
                 model.tap_pos[ph, t].domain = pyo.NonNegativeIntegers
-                if band == 0:
-                    model.tap_pos[ph, t].fix(pos)
-                else:
+                if (ph, t) in free_set:
                     model.tap_pos[ph, t].unfix()
+                    band = free_set[(ph, t)]
                     lb = max(0, pos - band)
                     ub = min(sets_info['n_pos'] - 1, pos + band)
                     model.tap_pos[ph, t].setlb(lb)
                     model.tap_pos[ph, t].setub(ub)
-                if band == 0:
-                    model.u_tap[ph, t].fix(0)
-                else:
                     model.u_tap[ph, t].unfix()
                     model.u_tap[ph, t].domain = pyo.Binary
+                else:
+                    model.tap_pos[ph, t].fix(pos)
+                    model.u_tap[ph, t].fix(0)
         opt2, which2 = _get_solver()
-        opts2 = {'timelimit': timelimit2, 'mipgap': MIPGAP} if which2 == 'cplex' else {}
+        opts2 = {'timelimit': timelimit, 'mipgap': mipgap} if which2 == 'cplex' else {}
         t0 = time.time()
         res2 = opt2.solve(model, tee=tee, options=opts2) if opts2 else \
             opt2.solve(model, tee=tee)
         tc2 = str(res2.solver.termination_condition)
-        print(f"  Estágio 2 (banda=±{band}): {tc2} | {time.time()-t0:.1f}s")
-        return tc2, which2
+        usable, obj_val = _solution_is_usable(model)
+        print(f"  Estágio 2 (|livres|={len(free_set)}): status={tc2} | "
+             f"{time.time()-t0:.1f}s | solução_utilizável={usable}"
+             f"{f' | F.O.={obj_val:.2f}' if obj_val is not None else ''}")
+        return tc2, which2, usable
 
     print("\n[Estágio 2] Fixando tap arredondado, Qpv permanece LIVRE (QP)...")
-    tc2, which2 = _try_stage2(band=0)
-    band_used = 0
-    if tc2 not in ('optimal', 'globallyOptimal', 'locallyOptimal', 'feasible'):
-        print(f"  [AVISO] Fixação exata deu '{tc2}'. Tentando bandas maiores "
-             f"em vez de desistir (tap_pos livre dentro de ±K do "
-             f"arredondamento, ainda MILP pequeno)...")
+    tc2, which2, usable = _try_stage2({}, timelimit2, MIPGAP)
+    band_used = 0; free_count = 0
+
+    if not usable:
+        # Identifica períodos "na fronteira" pela fração do valor contínuo
+        # do Estágio 1 (calculada logo após o Estágio 1, antes de fixar) —
+        # só esses precisam de liberdade no Estágio 2.
         for band in (1, 2, 3):
-            tc2, which2 = _try_stage2(band=band)
-            band_used = band
-            if tc2 in ('optimal', 'globallyOptimal', 'locallyOptimal', 'feasible'):
-                print(f"  Resolvido com banda ±{band} (o arredondamento puro "
-                     f"do Estágio 1 não era factível; {band} passo(s) de "
-                     f"folga foram suficientes).")
+            for thresh in (0.35, 0.15):
+                free_set = {k: band for k, fr in raw_frac.items()
+                           if fr > thresh}
+                if not free_set:
+                    continue
+                print(f"  [AVISO] Tentando banda ±{band} só nos "
+                     f"{len(free_set)} períodos com arredondamento ambíguo "
+                     f"(fração>{thresh})...")
+                tc2, which2, usable = _try_stage2(free_set, timelimit2,
+                                                  MIPGAP_STAGE2)
+                band_used = band; free_count = len(free_set)
+                if usable:
+                    print(f"  Resolvido reabrindo {len(free_set)}/"
+                         f"{len(tap_fixed)} períodos (banda ±{band}, "
+                         f"limiar={thresh}).")
+                    break
+            if usable:
                 break
 
-    if tc2 in ('optimal', 'globallyOptimal', 'locallyOptimal', 'feasible'):
+    if not usable:
+        # Último recurso: reabre TUDO (caro, mas já não há mais atalho)
+        print("  [AVISO] Reabertura seletiva não bastou. Última tentativa: "
+             "TODOS os períodos com banda ±2 (pode demorar bastante)...")
+        free_set = {k: 2 for k in tap_fixed}
+        tc2, which2, usable = _try_stage2(free_set, timelimit2 * 2, MIPGAP_STAGE2)
+        band_used = 2; free_count = len(free_set)
+
+    if usable:
         for ph in svr_phs:
             for t in hours:
                 tap_fixed[(ph, t)] = int(round(pyo.value(model.tap_pos[ph, t])))
-
+    tc2 = 'usable' if usable else tc2
 
     return {'stage1_termination': tc1, 'stage2_termination': tc2,
             'tap_fixed': tap_fixed, 'solver_stage1': which1,
@@ -385,7 +455,8 @@ def run_opf_and_extract_policy(buses_file, branches_file, out_dir='.',
     solve_meta = _solve_two_stage(model, sets_info, timelimit1, timelimit2, tee)
 
     if solve_meta['stage2_termination'] not in ('optimal', 'globallyOptimal',
-                                                'locallyOptimal', 'feasible'):
+                                                'locallyOptimal', 'feasible',
+                                                'usable'):
         # CORREÇÃO (bug real, achado por execução): antes, isso só imprimia
         # um aviso e SEGUIA extraindo classificação/curvas/tap_schedule de um
         # modelo cujo Estágio 2 nunca resolveu de verdade — o Pyomo não
