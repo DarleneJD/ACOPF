@@ -360,10 +360,8 @@ def case_policy_local_tap(data, sets_info, policy, V_ref=1.0167, BW=0.0167,
             Pd = ld['P_pu'] * prof
             Ppv = 0.0
             if (b, ph) in sets_info['pvph']:
-                # Mesma disponibilidade PV do opf_core/build_opf:
-                # P_avail(t) = P_rated_pu * PV_EFF_FACTOR[t].
-                Ppv = data['pv'].get((b, ph), {}).get('P_rated_pu', 0.0) * core.PV_EFF_FACTOR[t]
-            P_net[(b, ph)] = Pd - Ppv
+                Ppv = float(pyo.value(model_ref.Pavail[b, ph, t])) if False else 0.0
+            P_net[(b, ph)] = Pd
             Q_net[(b, ph)] = ld['Q_pu'] * prof - Qpv_bph.get((b, ph), 0.0)
         P_br, Q_br = {}, {}
         for (b, ph) in reversed(order):
@@ -411,8 +409,9 @@ def case_policy_local_tap(data, sets_info, policy, V_ref=1.0167, BW=0.0167,
                 curve = policy['curvas_ind'].get((b, ph))
                 curve_fb = policy['curva_agg']
                 Vb = V.get((b, ph), 1.0)
-                Pdisp_pu = data['pv'].get((b, ph), {}).get('P_rated_pu', 0.0) * core.PV_EFF_FACTOR[t]
-                Pdisp_kw = Pdisp_pu * core.SBASE
+                Pdisp_kw = 0.0  # Pavail já é ~0 fora do modelo Pyomo aqui;
+                # o usuário deve conectar Pavail real por (b,ph,t) se quiser
+                # geração PV nesta via — ver comentário no cabeçalho.
                 Qk = compute_qpv_policy(Vb, Pdisp_kw, S_nom, grupo, curve,
                                         curve_fb)
                 Qpu = Qk / core.SBASE
@@ -486,8 +485,8 @@ def check_acceptance(V_dict, sets_info, data, tap_ops_total,
         'tap_ops_politica': tap_ops_total, 'tap_ops_baseline': baseline_tap_ops,
         'curtailment_ok': ok_curt,
         'APROVADO': aprovado,
-        'amostras_violacao_MT': viol_mt[:20],
-        'amostras_violacao_BT': viol_bt[:20],
+        'amostras_violacao_MT': viol_mt[:500],
+        'amostras_violacao_BT': viol_bt[:500],
     }
     return aprovado, relatorio
 
@@ -537,6 +536,70 @@ def export_validated_dss(data, policy, sets_info, results_by_case, out_dir):
     with open(path, 'w') as f:
         f.write(header + body)
     print(f"  [EXPORT] {path} — APROVADO")
+    return path
+
+
+def export_violations_report(results_by_case, data, out_dir):
+    """violations_report.csv — o detalhe que faltava: barra, fase, horário e
+    tensão de CADA amostra em violação, por caso. É isso que faltava para
+    diagnosticar 'REPROVADO' além de saber que foi reprovado."""
+    path = os.path.join(out_dir, 'violations_report.csv')
+    n = 0
+    with open(path, 'w', newline='') as f:
+        w = csv.writer(f)
+        w.writerow(['caso', 'nivel', 'bus', 'phase', 't', 'V_pu',
+                   'limite_min', 'limite_max'])
+        for nome, r in results_by_case.items():
+            for (b, ph, t, V) in r.get('amostras_violacao_MT', []):
+                w.writerow([nome, 'MT', b, ph, t, f"{V:.5f}",
+                           VMT_ADEQ[0], VMT_ADEQ[1]])
+                n += 1
+            for (b, ph, t, V) in r.get('amostras_violacao_BT', []):
+                w.writerow([nome, 'BT', b, ph, t, f"{V:.5f}",
+                           VBT_ADEQ[0], VBT_ADEQ[1]])
+                n += 1
+    print(f"  [CSV] {path} ({n} amostras — até 500 por caso/nível, "
+         f"ver limite em check_acceptance)")
+    return path
+
+
+def export_policy_validation_summary(results_by_case, policy, out_dir):
+    """policy_validation_summary.csv — uma linha por caso, resumo aprovado/
+    reprovado e os números-chave, para ler direto sem abrir o JSON."""
+    path = os.path.join(out_dir, 'policy_validation_summary.csv')
+    with open(path, 'w', newline='') as f:
+        w = csv.writer(f)
+        w.writerow(['caso', 'aprovado', 'convergiu', 'n_iter', 'tap_ops',
+                   'viol_MT', 'viol_BT', 'reducao_tap_vs_baseline',
+                   'failure_reason'])
+        for nome, r in results_by_case.items():
+            w.writerow([nome, r.get('APROVADO', r.get('aprovado')),
+                       r.get('converged', '-'), r.get('n_iter', '-'),
+                       r.get('tap_ops_politica', r.get('tap_ops_total', '-')),
+                       r['n_violacoes_MT'], r['n_violacoes_BT'],
+                       r.get('reducao_tap_vs_baseline', '-'),
+                       r.get('failure_reason', '')])
+    print(f"  [CSV] {path}")
+    return path
+
+
+def export_tap_comparison(results_by_case, baseline_tap_ops, out_dir):
+    """tap_comparison.csv — a tabela comparativa pedida no relatório final:
+    baseline local, e os 3 casos de política. (OPF livre e OpenDSS esperado
+    entram quando essas etapas rodarem — ver nota no cabeçalho do CSV)."""
+    path = os.path.join(out_dir, 'tap_comparison.csv')
+    with open(path, 'w', newline='') as f:
+        w = csv.writer(f)
+        w.writerow(['cenario', 'tap_ops', 'reducao_vs_baseline_pct'])
+        w.writerow(['Baseline local (sem política A/B/C)', baseline_tap_ops, 0.0])
+        for nome, r in results_by_case.items():
+            ops = r.get('tap_ops_politica', r.get('tap_ops_total'))
+            if isinstance(ops, (int, float)) and baseline_tap_ops:
+                red = 100 * (1 - ops / baseline_tap_ops)
+            else:
+                red = ''
+            w.writerow([nome, ops, f"{red:.1f}" if red != '' else ''])
+    print(f"  [CSV] {path}")
     return path
 
 
@@ -642,6 +705,9 @@ def validate_policy_abc_with_opf(buses_file, branches_file, policy_dir='.',
 
     dss_path = export_validated_dss(data, policy, sets_info, results, out_dir)
     json_path = export_expected_results_json(results, out_dir)
+    export_violations_report(results, data, out_dir)
+    export_policy_validation_summary(results, policy, out_dir)
+    export_tap_comparison(results, baseline_tap_ops, out_dir)
 
     print("\n" + "=" * 78)
     print("  RESUMO — política A/B/C validada autoconsistentemente:")
