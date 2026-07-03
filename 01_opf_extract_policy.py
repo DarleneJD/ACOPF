@@ -98,26 +98,73 @@ def _solve_two_stage(model, sets_info, timelimit1=TIMELIMIT_STAGE1,
             tap_fixed[(ph, t)] = max(0, min(sets_info['n_pos'] - 1, pos))
 
     # ── Estágio 2: fixar tap, resolver QP puro (Qpv continua livre) ────────
-    print("\n[Estágio 2] Fixando tap arredondado, Qpv permanece LIVRE (QP)...")
-    for ph in svr_phs:
-        for t in hours:
-            model.tap_pos[ph, t].domain = pyo.NonNegativeReals
-            model.tap_pos[ph, t].fix(tap_fixed[(ph, t)])
-            model.u_tap[ph, t].fix(0)  # contabilizado via mudança de posição
+    # CORREÇÃO (bug real, achado por execução): fixar o tap EXATAMENTE no
+    # arredondamento do Estágio 1 pode ser infeasible — a relaxação contínua
+    # encontra uma posição "boa" na média, mas o arredondamento de um único
+    # período pode empurrar a rede para fora da faixa de tensão sem que
+    # NENHUM Qpv (mesmo livre) consiga compensar. Isso não é raro em MINLP
+    # relax-then-round perto da fronteira de factibilidade.
+    #
+    # Correção: se a fixação exata falhar, NÃO desiste — libera uma banda
+    # inteira pequena ao redor do arredondamento (tap_pos ∈ [pos-K, pos+K],
+    # ainda um MILP bem menor que o problema original, já que a maioria dos
+    # períodos seguiria "perto" do arredondamento) e deixa o solver corrigir
+    # só os períodos que realmente precisam. Se nem a banda mais larga
+    # tentada resolver, ABORTA e não deixa o pipeline seguir com resultado
+    # inválido (ao contrário do comportamento anterior, que prosseguia com
+    # o aviso mas exportava a política mesmo assim).
+    def _try_stage2(band):
+        for ph in svr_phs:
+            for t in hours:
+                pos = tap_fixed[(ph, t)]
+                model.tap_pos[ph, t].domain = pyo.NonNegativeIntegers
+                if band == 0:
+                    model.tap_pos[ph, t].fix(pos)
+                else:
+                    model.tap_pos[ph, t].unfix()
+                    lb = max(0, pos - band)
+                    ub = min(sets_info['n_pos'] - 1, pos + band)
+                    model.tap_pos[ph, t].setlb(lb)
+                    model.tap_pos[ph, t].setub(ub)
+                if band == 0:
+                    model.u_tap[ph, t].fix(0)
+                else:
+                    model.u_tap[ph, t].unfix()
+                    model.u_tap[ph, t].domain = pyo.Binary
+        opt2, which2 = _get_solver()
+        opts2 = {'timelimit': timelimit2, 'mipgap': MIPGAP} if which2 == 'cplex' else {}
+        t0 = time.time()
+        res2 = opt2.solve(model, tee=tee, options=opts2) if opts2 else \
+            opt2.solve(model, tee=tee)
+        tc2 = str(res2.solver.termination_condition)
+        print(f"  Estágio 2 (banda=±{band}): {tc2} | {time.time()-t0:.1f}s")
+        return tc2, which2
 
-    opt2, which2 = _get_solver()
-    opts2 = {}
-    if which2 == 'cplex':
-        opts2 = {'timelimit': timelimit2, 'mipgap': MIPGAP}
-    t0 = time.time()
-    res2 = opt2.solve(model, tee=tee, options=opts2) if opts2 else \
-        opt2.solve(model, tee=tee)
-    tc2 = str(res2.solver.termination_condition)
-    print(f"  Estágio 2: {tc2} | {time.time()-t0:.1f}s")
+    print("\n[Estágio 2] Fixando tap arredondado, Qpv permanece LIVRE (QP)...")
+    tc2, which2 = _try_stage2(band=0)
+    band_used = 0
+    if tc2 not in ('optimal', 'globallyOptimal', 'locallyOptimal', 'feasible'):
+        print(f"  [AVISO] Fixação exata deu '{tc2}'. Tentando bandas maiores "
+             f"em vez de desistir (tap_pos livre dentro de ±K do "
+             f"arredondamento, ainda MILP pequeno)...")
+        for band in (1, 2, 3):
+            tc2, which2 = _try_stage2(band=band)
+            band_used = band
+            if tc2 in ('optimal', 'globallyOptimal', 'locallyOptimal', 'feasible'):
+                print(f"  Resolvido com banda ±{band} (o arredondamento puro "
+                     f"do Estágio 1 não era factível; {band} passo(s) de "
+                     f"folga foram suficientes).")
+                break
+
+    if tc2 in ('optimal', 'globallyOptimal', 'locallyOptimal', 'feasible'):
+        for ph in svr_phs:
+            for t in hours:
+                tap_fixed[(ph, t)] = int(round(pyo.value(model.tap_pos[ph, t])))
+
 
     return {'stage1_termination': tc1, 'stage2_termination': tc2,
             'tap_fixed': tap_fixed, 'solver_stage1': which1,
-            'solver_stage2': which2}
+            'solver_stage2': which2, 'stage2_band_used': band_used}
 
 
 # =============================================================================
@@ -296,7 +343,7 @@ def export_diagnostics_json(model, data, sets_info, solve_meta, ops_by_phase,
         'classificacao': {g: len(v) for g, v in groups.items()},
         'FD_diagnostico': fd if isinstance(fd, dict) else str(fd),
         'pesos': {
-            'W_DV': core.W_DV, 'W_UNBAL': core.W_UNBAL, 'W_TAP': getattr(core, 'W_TAP_OPS', None),
+            'W_DV': core.W_DV, 'W_UNBAL': core.W_UNBAL, 'W_TAP': core.W_TAP,
             'W_Q_USE': getattr(core, 'W_Q_USE', None),
             'W_CURT': core.W_CURT, 'W_CORE': core.W_CORE,
         },
@@ -338,11 +385,30 @@ def run_opf_and_extract_policy(buses_file, branches_file, out_dir='.',
     solve_meta = _solve_two_stage(model, sets_info, timelimit1, timelimit2, tee)
 
     if solve_meta['stage2_termination'] not in ('optimal', 'globallyOptimal',
-                                                'locallyOptimal'):
-        print(f"\n  [AVISO] Estágio 2 terminou como "
-              f"'{solve_meta['stage2_termination']}' — a solução pode não "
-              f"ser confiável. Prosseguindo mesmo assim para permitir "
-              f"inspeção, mas NÃO trate isso como política candidata válida.")
+                                                'locallyOptimal', 'feasible'):
+        # CORREÇÃO (bug real, achado por execução): antes, isso só imprimia
+        # um aviso e SEGUIA extraindo classificação/curvas/tap_schedule de um
+        # modelo cujo Estágio 2 nunca resolveu de verdade — o Pyomo não
+        # atualiza as variáveis num solve infeasible, então tudo exportado
+        # dali para frente refletia o estado de ANTES do Estágio 2 (lixo).
+        # Isso explicava políticas reprovadas no Código 2 por um motivo que
+        # não tinha nada a ver com a política em si. Agora interrompe de
+        # verdade — nenhum arquivo de política é escrito.
+        msg = (f"Estágio 2 não encontrou solução válida mesmo após tentar "
+              f"bandas de folga (±1,±2,±3) em torno do arredondamento do "
+              f"Estágio 1 — status final: '{solve_meta['stage2_termination']}'. "
+              f"NÃO é seguro extrair política deste modelo (as variáveis "
+              f"não refletem uma solução real do Estágio 2). Aumente "
+              f"timelimit2, revise se a rede tem folga de tensão suficiente "
+              f"para ALGUMA discretização de tap, ou rode com tee=True para "
+              f"ver o log do solver e decidir o próximo passo.")
+        print(f"\n  [ERRO] {msg}")
+        diag_path = os.path.join(out_dir, 'opf_diagnostics_FALHA.json')
+        with open(diag_path, 'w') as f:
+            json.dump({'erro': msg, 'solve_meta': {k: v for k, v in
+                      solve_meta.items() if k != 'tap_fixed'}}, f, indent=2)
+        print(f"  [JSON] {diag_path} (diagnóstico da falha, sem política)")
+        raise RuntimeError(msg)
 
     print("\n  Exportando série temporal e cronograma de tap...")
     ts_path = export_solution_timeseries(model, data, sets_info, out_dir)
