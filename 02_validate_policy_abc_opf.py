@@ -229,6 +229,14 @@ def fixed_point_solve(model, data, sets_info, policy, solver_getter,
 
     hist_dV, hist_dQ, hist_tc = [], [], []
     V_curr = _extract_V(model, sets_info)  # V inicial = warm-start
+    # CORREÇÃO (bug real, achado por execução): quando a PRIMEIRA iteração já
+    # dá infeasible, V_final devolvido era o warm-start puro (nunca resolvido
+    # de verdade) — mas check_acceptance era chamado sobre ele do mesmo jeito,
+    # reportando 'viol_MT=46 viol_BT=1272' como se fosse a política, quando na
+    # verdade é só a distância do palpite inicial até os limites. has_valid_v
+    # marca isso explicitamente: só vira True depois do PRIMEIRO solve que
+    # realmente carregou uma solução.
+    has_valid_v = False
 
     for it in range(1, max_outer + 1):
         Qpv_new, max_dQ_fix = _apply_policy_qpv(model, data, sets_info,
@@ -248,9 +256,11 @@ def fixed_point_solve(model, data, sets_info, policy, solver_getter,
             return {'converged': False, 'n_iter': it, 'max_dV_hist': hist_dV,
                    'max_dQ_hist': hist_dQ, 'V_final': V_curr,
                    'Qpv_final': Qpv_new, 'termination_hist': hist_tc,
+                   'has_valid_v': has_valid_v,
                    'failure_reason': f'solver_status={tc} na iteração {it}'}
 
         V_new = _extract_V(model, sets_info)
+        has_valid_v = True
         max_dV = max((abs(V_new[k] - V_curr.get(k, V_new[k])) for k in V_new),
                     default=0.0)
         hist_dV.append(max_dV)
@@ -263,11 +273,13 @@ def fixed_point_solve(model, data, sets_info, policy, solver_getter,
         if max_dV < TOL_V and max_dQ_fix < TOL_Q and it > 1:
             return {'converged': True, 'n_iter': it, 'max_dV_hist': hist_dV,
                    'max_dQ_hist': hist_dQ, 'V_final': V_curr,
-                   'Qpv_final': Qpv_new, 'termination_hist': hist_tc}
+                   'Qpv_final': Qpv_new, 'termination_hist': hist_tc,
+                   'has_valid_v': has_valid_v}
 
     return {'converged': False, 'n_iter': max_outer, 'max_dV_hist': hist_dV,
            'max_dQ_hist': hist_dQ, 'V_final': V_curr,
            'Qpv_final': Qpv_new, 'termination_hist': hist_tc,
+           'has_valid_v': has_valid_v,
            'failure_reason': f'não convergiu em {max_outer} iterações '
                              f'(último ΔV={hist_dV[-1]:.2e}, '
                              f'ΔQ={hist_dQ[-1]:.2e})'}
@@ -459,7 +471,18 @@ def case_policy_local_tap(data, sets_info, policy, V_ref=1.0167, BW=0.0167,
 # =============================================================================
 def check_acceptance(V_dict, sets_info, data, tap_ops_total,
                      baseline_tap_ops, curtailment_ok=True):
-    """Verifica os 5 critérios obrigatórios. Retorna (aprovado, relatorio)."""
+    """Verifica os 5 critérios obrigatórios. Retorna (aprovado, relatorio).
+
+    CORREÇÃO (achada por pergunta direta da usuária): baseline_tap_ops=None
+    agora significa EXPLICITAMENTE 'baseline real não fornecido' — o
+    critério de redução de tap fica com valor None (indeterminado), e
+    'APROVADO' também vira None em vez de True/False. Antes, a ausência de
+    baseline caía silenciosamente para tap_ops_total_opf_livre (o resultado
+    do PRÓPRIO OPF livre) — comparar a política contra o melhor caso teórico
+    (Qpv contínuo livre) em vez de contra o controle local sem coordenação
+    é uma barra que nenhuma política discreta A/B/C tem chance real de
+    superar, e produzia reprovações que não diziam nada sobre a política.
+    """
     viol_mt, viol_bt, n_mt, n_bt = [], [], 0, 0
     for (b, ph, t), V in V_dict.items():
         level = data['buses'].get(b, {}).get('level', 'mv')
@@ -474,16 +497,27 @@ def check_acceptance(V_dict, sets_info, data, tap_ops_total,
 
     ok_v_mt = len(viol_mt) == 0
     ok_v_bt = len(viol_bt) == 0
-    ok_tap_reduction = tap_ops_total < baseline_tap_ops
     ok_curt = curtailment_ok
 
-    aprovado = ok_v_mt and ok_v_bt and ok_tap_reduction and ok_curt
+    if baseline_tap_ops is None:
+        ok_tap_reduction = None  # indeterminado — sem baseline real
+    else:
+        ok_tap_reduction = tap_ops_total < baseline_tap_ops
+
+    # aprovado_eletrico_termico: os 3 critérios que SEMPRE dá pra avaliar,
+    # independente de ter baseline ou não (útil mesmo quando o baseline
+    # ainda não está disponível).
+    aprovado_eletrico = ok_v_mt and ok_v_bt and ok_curt
+    aprovado = None if ok_tap_reduction is None else (
+        aprovado_eletrico and ok_tap_reduction)
+
     relatorio = {
         'zero_violacoes_MT': ok_v_mt, 'n_violacoes_MT': len(viol_mt),
         'zero_violacoes_BT': ok_v_bt, 'n_violacoes_BT': len(viol_bt),
         'reducao_tap_vs_baseline': ok_tap_reduction,
         'tap_ops_politica': tap_ops_total, 'tap_ops_baseline': baseline_tap_ops,
         'curtailment_ok': ok_curt,
+        'aprovado_eletrico_termico_apenas': aprovado_eletrico,
         'APROVADO': aprovado,
         'amostras_violacao_MT': viol_mt[:500],
         'amostras_violacao_BT': viol_bt[:500],
@@ -620,15 +654,54 @@ def export_expected_results_json(results_by_case, out_dir):
 # =============================================================================
 # FUNÇÃO PRINCIPAL
 # =============================================================================
+def compute_local_baseline_tap_ops(baseline_module, buses_file, branches_file,
+                                   ldc_mode='deployed'):
+    """Calcula o baseline REAL (controle local, SEM política A/B/C) chamando
+    baseline.py diretamente — em vez de exigir que o número seja digitado
+    manualmente. 'deployed' usa as configurações reais do equipamento
+    (R=3V/X=9V), a mesma referência histórica (~33 ops).
+
+    baseline_module: o módulo baseline.py já carregado (ex.: via
+    load_module_from_file('baseline', CODE_DIR / 'baseline.py'), o mesmo
+    padrão já usado para core/step1/step2 no notebook)."""
+    data = baseline_module.load_data(buses_file, branches_file)
+    _, order, par = baseline_module.build_tree(data)
+    baseline_module.set_ldc(data, par, ldc_mode)
+    ops, _, _ = baseline_module.simulate_baseline(data, verbose=False)
+    total = sum(ops.values())
+    print(f"  [baseline real] simulate_baseline(modo='{ldc_mode}') -> "
+         f"{total} ops totais, por fase={dict(ops)}")
+    return total
+
+
 def validate_policy_abc_with_opf(buses_file, branches_file, policy_dir='.',
                                  out_dir='.', timelimit=300, tee=False,
-                                 enable_phase_coupling=None):
+                                 enable_phase_coupling=None,
+                                 baseline_tap_ops=None, baseline_module=None):
     """enable_phase_coupling: None mantém o default do opf_core (True); passe
     False para desligar o acoplamento entre fases MT nesta execução — útil
     para isolar se um problema é do acoplamento ou de outra coisa (ex.: o
     bug de capacidade do Qpv corrigido acima, que NÃO tinha relação com
     acoplamento — vale rodar com coupling=True de novo depois do fix antes
-    de decidir desligar de vez)."""
+    de decidir desligar de vez).
+
+    baseline_tap_ops: número de operações de tap do CONTROLE LOCAL sem
+    política A/B/C. Se você já sabe o valor (ex.: 33, da referência
+    histórica), pode passar direto aqui.
+
+    baseline_module: ALTERNATIVA a baseline_tap_ops — passe o módulo
+    baseline.py já carregado (mesmo padrão de load_module_from_file usado
+    para core/step1/step2) e o código calcula o baseline real na hora,
+    para ESTA rede/configuração específica, em vez de depender de um
+    número digitado manualmente que pode ficar desatualizado. Se os dois
+    forem fornecidos, baseline_tap_ops tem prioridade (permite override
+    manual mesmo com o módulo disponível).
+
+    Se NENHUM dos dois for fornecido, o critério de redução de tap e
+    'APROVADO' ficam marcados como None (indeterminado) em todos os
+    relatórios — não True nem False, porque comparar contra o resultado do
+    próprio OPF livre (o melhor caso teórico) não é um baseline de verdade
+    e nenhuma política discreta A/B/C bateria essa barra."""
     if enable_phase_coupling is not None:
         core.ENABLE_PHASE_COUPLING = enable_phase_coupling
         print(f"  [config] ENABLE_PHASE_COUPLING = {core.ENABLE_PHASE_COUPLING}")
@@ -636,6 +709,20 @@ def validate_policy_abc_with_opf(buses_file, branches_file, policy_dir='.',
     print("=" * 78)
     print("  CÓDIGO 2 — VALIDAÇÃO AUTOCONSISTENTE DA POLÍTICA A/B/C")
     print("=" * 78)
+
+    if baseline_tap_ops is None and baseline_module is not None:
+        baseline_tap_ops = compute_local_baseline_tap_ops(
+            baseline_module, buses_file, branches_file)
+
+    if baseline_tap_ops is None:
+        print("\n  " + "!" * 74)
+        print("  [AVISO CRÍTICO] baseline_tap_ops NÃO foi fornecido (nem "
+             "direto nem via baseline_module).")
+        print("  O critério 'redução de tap vs. baseline' e 'APROVADO' vão ")
+        print("  aparecer como None (indeterminado) em TODOS os casos — não")
+        print("  True nem False. Passe baseline_tap_ops=33 (referência) ou")
+        print("  baseline_module=<baseline.py carregado> para calcular na hora.")
+        print("  " + "!" * 74 + "\n")
 
     policy = load_policy(policy_dir)
     data = core.load_data(buses_file, branches_file)
@@ -660,40 +747,75 @@ def validate_policy_abc_with_opf(buses_file, branches_file, policy_dir='.',
 
     with open(os.path.join(policy_dir, 'opf_diagnostics.json')) as f:
         diag = json.load(f)
-    baseline_tap_ops = diag.get('tap_ops_total_opf_livre', 999999)
-    # Nota: o "baseline verdadeiro" (controle local SEM política) deve vir de
-    # simulate_svr_local_control / baseline.py já validados neste projeto;
-    # aqui usamos o total do OPF livre como piso de referência conservador
-    # se um baseline local dedicado não for fornecido separadamente.
+    tap_ops_opf_livre = diag.get('tap_ops_total_opf_livre')
+    # CORREÇÃO: baseline_tap_ops vem SÓ do parâmetro da função agora. Nunca
+    # mais cai de volta para tap_ops_opf_livre (resultado do próprio OPF
+    # livre) — isso é o melhor caso teórico, não um baseline, e usá-lo aqui
+    # tornava o critério de redução de tap essencialmente impossível de
+    # cumprir para qualquer política discreta A/B/C. Se baseline_tap_ops for
+    # None, o aviso crítico já foi impresso acima e check_acceptance vai
+    # marcar 'reducao_tap_vs_baseline' e 'APROVADO' como None (indeterminado)
+    # em vez de usar um número que não representa o baseline real.
+    print(f"  [ref.] tap_ops do OPF livre (melhor caso teórico, NÃO é "
+         f"baseline): {tap_ops_opf_livre}")
+    print(f"  [ref.] baseline_tap_ops (controle local, usado no critério "
+         f"de aceitação): {baseline_tap_ops}")
+
+    def _report_not_evaluable(reason):
+        """Quando has_valid_v=False, NÃO chama check_acceptance — reportar
+        violações sobre o warm-start (nunca resolvido de verdade) seria
+        exatamente o bug que gerava 'viol_MT=46 viol_BT=1272' idênticos em
+        FIXED_TAP e OPTIMAL_TAP: os dois liam o mesmo palpite inicial, não
+        um resultado real da política. Mantém o mesmo formato de dict que
+        check_acceptance devolve, para não quebrar os exportadores de CSV."""
+        return False, {
+            'zero_violacoes_MT': None, 'n_violacoes_MT': None,
+            'zero_violacoes_BT': None, 'n_violacoes_BT': None,
+            'reducao_tap_vs_baseline': None, 'tap_ops_politica': '-',
+            'tap_ops_baseline': baseline_tap_ops, 'curtailment_ok': None,
+            'APROVADO': False, 'amostras_violacao_MT': [],
+            'amostras_violacao_BT': [],
+            'nao_avaliavel': True, 'motivo_nao_avaliavel': reason,
+        }
 
     results = {}
 
     model1, sets_info, _ = core.build_opf(data, core.HOURS)
     r1 = case_policy_fixed_tap(data, sets_info, model1, policy, tap_schedule,
                                solver_getter, timelimit, tee)
-    ok1, rep1 = check_acceptance(r1['V_final'], sets_info, data,
-                                 baseline_tap_ops, baseline_tap_ops + 1)
+    if r1.get('has_valid_v'):
+        ok1, rep1 = check_acceptance(r1['V_final'], sets_info, data,
+                                     tap_ops_opf_livre, baseline_tap_ops)
+    else:
+        ok1, rep1 = _report_not_evaluable(r1.get('failure_reason', '?'))
     rep1['converged'] = r1['converged']; rep1['n_iter'] = r1['n_iter']
     rep1['aprovado'] = ok1
     results['POLICY_FIXED_TAP'] = rep1
     print(f"  POLICY_FIXED_TAP: convergiu={r1['converged']} "
-         f"({r1['n_iter']} iter) | aprovado={ok1}")
+         f"({r1['n_iter']} iter) | aprovado={ok1}"
+         f"{' | NÃO AVALIÁVEL (sem solve real)' if not r1.get('has_valid_v') else ''}")
 
     model2, sets_info2, _ = core.build_opf(data, core.HOURS)
     r2 = case_policy_optimal_tap(data, sets_info2, model2, policy,
                                 solver_getter, timelimit, tee)
-    tap_traj2 = {ph: {t: int(round(pyo.value(model2.tap_pos[ph, t])))
-                     for t in sets_info2['hours']}
-                for ph in sets_info2['svr_phs']}
-    ops2, total2 = _count_tap_ops(tap_traj2)
-    ok2, rep2 = check_acceptance(r2['V_final'], sets_info2, data, total2,
-                                 baseline_tap_ops)
+    if r2.get('has_valid_v'):
+        tap_traj2 = {ph: {t: int(round(pyo.value(model2.tap_pos[ph, t])))
+                         for t in sets_info2['hours']}
+                    for ph in sets_info2['svr_phs']}
+        ops2, total2 = _count_tap_ops(tap_traj2)
+        ok2, rep2 = check_acceptance(r2['V_final'], sets_info2, data, total2,
+                                     baseline_tap_ops)
+        rep2['tap_ops_total'] = total2; rep2['ops_by_phase'] = ops2
+    else:
+        ok2, rep2 = _report_not_evaluable(r2.get('failure_reason', '?'))
+        rep2['tap_ops_total'] = 0
     rep2['converged'] = r2['converged']; rep2['n_iter'] = r2['n_iter']
-    rep2['tap_ops_total'] = total2; rep2['ops_by_phase'] = ops2
     rep2['aprovado'] = ok2
     results['POLICY_OPTIMAL_TAP'] = rep2
     print(f"  POLICY_OPTIMAL_TAP: convergiu={r2['converged']} "
-         f"({r2['n_iter']} iter) | tap_ops={total2} | aprovado={ok2}")
+         f"({r2['n_iter']} iter) | tap_ops={rep2['tap_ops_total']} | "
+         f"aprovado={ok2}"
+         f"{' | NÃO AVALIÁVEL (sem solve real)' if not r2.get('has_valid_v') else ''}")
 
     r3 = case_policy_local_tap(data, sets_info, policy)
     ok3, rep3 = check_acceptance(r3['V_final'], sets_info, data,
