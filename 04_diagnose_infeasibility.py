@@ -110,12 +110,26 @@ def parse_conflict_members(raw_output):
     dv_pos[bus=611, ph=3, t=0], não 'dv_pos[611,3,0]'). Barras que começam
     com dígito ganham underscore de escape nas duas pontas. Ajustado para
     esse formato real em vez do bracket-style que eu tinha assumido antes
-    de testar."""
+    de testar.
+
+    CORREÇÃO (achada rodando contra a saída real do CPLEX): o banner de
+    abertura do CPLEX interativo imprime algo como 'IBM(R) ILOG(R)
+    CPLEX(R) Interactive Optimizer...', e o regex abaixo casava 'IBM',
+    'ILOG' e 'CPLEX' como se fossem nomes de restrição com índice 'R' (o
+    símbolo de marca registrada entre parênteses) — 3 falsos positivos
+    fixos em toda rodada, inflando a contagem de 'elementos do conflito'.
+    Fix: ignora esses nomes conhecidos do banner e exige que o conteúdo
+    entre parênteses tenha ao menos um dígito (índice real de Pyomo
+    sempre tem — barra/fase/período), o que também descarta qualquer
+    outro texto de banner/copyright no mesmo formato 'Palavra(coisa)'."""
     members = []
     pattern = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)\(([^)]+)\)')
+    _BANNER_NAMES = {'IBM', 'ILOG', 'CPLEX'}
     for line in raw_output.splitlines():
         for m in pattern.finditer(line):
             cons_name, idx_raw = m.group(1), m.group(2)
+            if cons_name in _BANNER_NAMES or not any(c.isdigit() for c in idx_raw):
+                continue
             # desfaz o escape: tira underscores duplos/nas pontas, separa
             parts = [p for p in idx_raw.strip('_').split('_') if p]
             members.append((cons_name, tuple(parts)))
