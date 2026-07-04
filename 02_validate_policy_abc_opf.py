@@ -193,7 +193,8 @@ _VALID_TC = ('optimal', 'globallyOptimal', 'locallyOptimal', 'feasible')
 
 def fixed_point_solve(model, data, sets_info, policy, solver_getter,
                       tap_mode, timelimit=300, tee=False,
-                      max_outer=MAX_OUTER_ITER):
+                      max_outer=MAX_OUTER_ITER, diagnose_module=None,
+                      diag_out_dir=None):
     """Resolve o ciclo Qpv=f_ABC(V) <-> V=f_rede(Qpv,tap) até convergir.
 
     tap_mode: 'fixed'   -> tap_pos fixo na trajetória do OPF livre (já deve
@@ -202,6 +203,18 @@ def fixed_point_solve(model, data, sets_info, policy, solver_getter,
               (o caso 'local' — POLICY_LOCAL_TAP — NÃO usa esta função; usa
               simulate_local_tap_fixed_point, que reimplementa a física fora
               do Pyomo para refletir o regulador LDC físico)
+
+    diagnose_module: módulo 04_diagnose_infeasibility.py já carregado
+    (opcional). Se fornecido, quando o solve falhar, chama automaticamente
+    o refinador de conflitos do CPLEX sobre o modelo NO ESTADO EXATO da
+    falha (Qpv já fixado nos valores que causaram o infeasible, tap_pos
+    fixo ou livre conforme tap_mode) — sem precisar replicar manualmente a
+    montagem do modelo. Especialmente informativo em tap_mode='optimal':
+    se DALI já sair infeasible com o tap totalmente livre, o problema não é
+    escolha de tap — é a própria política (classificação/curvas A/B/C) que
+    não tem NENHUM tap que a torne viável.
+    diag_out_dir: pasta onde salvar os arquivos do diagnóstico (obrigatório
+    se diagnose_module for passado).
 
     CORREÇÃO (bug real, achado por execução): antes, um solve 'infeasible'
     fazia _extract_V devolver o MESMO V de antes (o solver não atualiza as
@@ -253,6 +266,19 @@ def fixed_point_solve(model, data, sets_info, policy, solver_getter,
             print(f"    [ponto-fixo it={it}] status={tc} — INTERROMPENDO "
                  f"(refixar o mesmo Qpv repetiria o mesmo resultado; "
                  f"veja compute_qpv_policy/restrições de capacidade)")
+            if diagnose_module is not None:
+                sub_dir = os.path.join(diag_out_dir or '.',
+                                      f'conflito_{tap_mode}_it{it}')
+                print(f"    [diagnóstico automático] rodando refinador de "
+                     f"conflitos do CPLEX sobre o modelo neste estado "
+                     f"exato (Qpv já fixado, tap_mode='{tap_mode}')...")
+                try:
+                    diagnose_module.diagnose_infeasibility_cplex_conflict(
+                        model, sub_dir,
+                        cplex_exe=os.environ.get('CPLEX_EXE'))
+                except Exception as e:
+                    print(f"    [AVISO] diagnóstico automático falhou: {e} "
+                         f"— rode manualmente depois se precisar.")
             return {'converged': False, 'n_iter': it, 'max_dV_hist': hist_dV,
                    'max_dQ_hist': hist_dQ, 'V_final': V_curr,
                    'Qpv_final': Qpv_new, 'termination_hist': hist_tc,
@@ -289,7 +315,8 @@ def fixed_point_solve(model, data, sets_info, policy, solver_getter,
 # 4) OS TRÊS CASOS OBRIGATÓRIOS
 # =============================================================================
 def case_policy_fixed_tap(data, sets_info, model, policy, tap_schedule,
-                          solver_getter, timelimit=300, tee=False):
+                          solver_getter, timelimit=300, tee=False,
+                          diagnose_module=None, diag_out_dir=None):
     """POLICY_FIXED_TAP — tap fixo na trajetória do OPF livre (Código 1);
     só Qpv se ajusta pela política, autoconsistentemente."""
     print("\n  [POLICY_FIXED_TAP] tap fixo no OPF livre, Qpv autoconsistente...")
@@ -299,17 +326,24 @@ def case_policy_fixed_tap(data, sets_info, model, policy, tap_schedule,
             model.tap_pos[ph, t].domain = pyo.NonNegativeReals
             model.tap_pos[ph, t].fix(pos)
     return fixed_point_solve(model, data, sets_info, policy, solver_getter,
-                             tap_mode='fixed', timelimit=timelimit, tee=tee)
+                             tap_mode='fixed', timelimit=timelimit, tee=tee,
+                             diagnose_module=diagnose_module,
+                             diag_out_dir=diag_out_dir)
 
 
 def case_policy_optimal_tap(data, sets_info, model, policy, solver_getter,
-                            timelimit=300, tee=False):
+                            timelimit=300, tee=False, diagnose_module=None,
+                            diag_out_dir=None):
     """POLICY_OPTIMAL_TAP — tap livre (MILP a cada iteração), Qpv pela
     política. Teto de desempenho: melhor que a política consegue COM
-    coordenação de tap."""
+    coordenação de tap. É o caso MAIS diagnóstico para infeasibilidade: se
+    falhar mesmo com tap livre, o problema é a política em si, não a
+    escolha de tap."""
     print("\n  [POLICY_OPTIMAL_TAP] tap livre (MILP), Qpv autoconsistente...")
     return fixed_point_solve(model, data, sets_info, policy, solver_getter,
-                             tap_mode='optimal', timelimit=timelimit, tee=tee)
+                             tap_mode='optimal', timelimit=timelimit, tee=tee,
+                             diagnose_module=diagnose_module,
+                             diag_out_dir=diag_out_dir)
 
 
 def _count_tap_ops(tap_traj_by_phase):
@@ -677,8 +711,16 @@ def compute_local_baseline_tap_ops(baseline_module, buses_file, branches_file,
 def validate_policy_abc_with_opf(buses_file, branches_file, policy_dir='.',
                                  out_dir='.', timelimit=300, tee=False,
                                  enable_phase_coupling=None,
-                                 baseline_tap_ops=None, baseline_module=None):
-    """enable_phase_coupling: None mantém o default do opf_core (True); passe
+                                 baseline_tap_ops=None, baseline_module=None,
+                                 diagnose_module=None):
+    """diagnose_module: módulo 04_diagnose_infeasibility.py já carregado
+    (mesmo padrão de load_module_from_file usado para core/step1/step2/
+    baseline). Se fornecido, quando POLICY_FIXED_TAP ou POLICY_OPTIMAL_TAP
+    derem infeasible, o refinador de conflitos do CPLEX roda automaticamente
+    sobre o modelo no estado exato da falha — os arquivos ficam em
+    {out_dir}/conflito_fixed_it1/ ou conflito_optimal_it1/.
+
+    enable_phase_coupling: None mantém o default do opf_core (True); passe
     False para desligar o acoplamento entre fases MT nesta execução — útil
     para isolar se um problema é do acoplamento ou de outra coisa (ex.: o
     bug de capacidade do Qpv corrigido acima, que NÃO tinha relação com
@@ -782,7 +824,9 @@ def validate_policy_abc_with_opf(buses_file, branches_file, policy_dir='.',
 
     model1, sets_info, _ = core.build_opf(data, core.HOURS)
     r1 = case_policy_fixed_tap(data, sets_info, model1, policy, tap_schedule,
-                               solver_getter, timelimit, tee)
+                               solver_getter, timelimit, tee,
+                               diagnose_module=diagnose_module,
+                               diag_out_dir=out_dir)
     if r1.get('has_valid_v'):
         ok1, rep1 = check_acceptance(r1['V_final'], sets_info, data,
                                      tap_ops_opf_livre, baseline_tap_ops)
@@ -797,7 +841,9 @@ def validate_policy_abc_with_opf(buses_file, branches_file, policy_dir='.',
 
     model2, sets_info2, _ = core.build_opf(data, core.HOURS)
     r2 = case_policy_optimal_tap(data, sets_info2, model2, policy,
-                                solver_getter, timelimit, tee)
+                                solver_getter, timelimit, tee,
+                                diagnose_module=diagnose_module,
+                                diag_out_dir=out_dir)
     if r2.get('has_valid_v'):
         tap_traj2 = {ph: {t: int(round(pyo.value(model2.tap_pos[ph, t])))
                          for t in sets_info2['hours']}
