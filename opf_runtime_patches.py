@@ -11,11 +11,13 @@ Purpose:
   2) prevent PF=0.85 capacitive export for inverters near high voltage;
   3) export monophase PVSystems with kV=0.277 instead of 0.480;
   4) validate exported policy without relying on unexported curtailment;
-  5) export a final DSS only if POLICY_LOCAL_TAP is approved.
+  5) export a validated DSS only if POLICY_LOCAL_TAP is approved;
+  6) if local validation fails, export a clearly marked UNVALIDATED DSS for diagnosis.
 """
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
 
 import pyomo.environ as pyo
@@ -144,6 +146,59 @@ def _patch_export_pvsystems(core):
     core.export_pvsystems_to_dss = export_patched
 
 
+def _export_unvalidated_dss_for_diagnosis(step2, data, policy, out_dir):
+    """Export a candidate DSS even when validation fails, clearly marked as unsafe.
+
+    This is useful to run OpenDSS and inspect violations, but it must not be
+    treated as a validated/final policy.
+    """
+    core = step2.core
+    os.makedirs(out_dir, exist_ok=True)
+
+    groups_for_export = {"A": [], "B": [], "C": []}
+    for (bus, ph), group in policy["grupo_de"].items():
+        groups_for_export.setdefault(group, []).append((bus, ph))
+
+    import numpy as np
+    inv_data_stub = {
+        key: {
+            "Q_arr": np.array([0.0]),
+            "Q_max_inv": policy["S_nom_de"].get(key, 0.0) * step2.TAN_FP_A,
+        }
+        for key in policy["grupo_de"]
+    }
+
+    inferred_b = []
+    for (bus, ph), curve in policy["curvas_ind"].items():
+        if policy["grupo_de"].get((bus, ph)) == "B":
+            inferred_b.append({
+                "bus": bus,
+                "ph": ph,
+                "V1": curve["V1"],
+                "V2": curve["V2"],
+                "V3": curve["V3"],
+                "V4": curve["V4"],
+                "Q_max": curve["Q_max_kVAr"] / core.SBASE,
+                "rmse_pct": 0.0,
+            })
+
+    path = os.path.join(out_dir, "pvsystems_policy_UNVALIDATED_localtap_failed.dss")
+    core.export_pvsystems_to_dss(data, groups_for_export, inv_data_stub, inferred_b, out_path=path)
+
+    body = Path(path).read_text(encoding="utf-8")
+    header = (
+        "! ============================================================\n"
+        "! POLITICA NAO VALIDADA — USAR SOMENTE PARA DIAGNOSTICO\n"
+        "! POLICY_LOCAL_TAP nao foi aprovado no Codigo 2.\n"
+        "! Este arquivo e gerado apenas para testar no OpenDSS e localizar\n"
+        "! violacoes de tensao/tap. NAO citar como politica final validada.\n"
+        "! ============================================================\n\n"
+    )
+    Path(path).write_text(header + body, encoding="utf-8")
+    print(f"  [EXPORT-DIAG] {path} — NAO VALIDADO")
+    return path
+
+
 def _patch_validation(step2):
     # Caso tap fixo: não permitir que a validação use Pcurt que não será exportado.
     original_fixed = step2.case_policy_fixed_tap
@@ -169,15 +224,17 @@ def _patch_validation(step2):
         optimal_patched._runtime_patched = True
         step2.case_policy_optimal_tap = optimal_patched
 
-    # Export final só com POLICY_LOCAL_TAP aprovado, pois o OpenDSS roda RegControl ativo.
+    # Export validado só com POLICY_LOCAL_TAP aprovado; se reprovar, exporta
+    # candidato UNVALIDATED para diagnóstico, com nome e cabeçalho explícitos.
     original_export = step2.export_validated_dss
     if not getattr(original_export, "_runtime_patched", False):
         def export_patched(data, policy, sets_info, results_by_case, out_dir):
             ok_local = results_by_case.get("POLICY_LOCAL_TAP", {}).get("aprovado") is True
             if not ok_local:
-                print("\n  [EXPORT] REPROVADO — POLICY_LOCAL_TAP não passou. ")
-                print("  .dss NÃO gerado para uso com RegControl ativo no OpenDSS.")
-                return None
+                print("\n  [EXPORT] REPROVADO — POLICY_LOCAL_TAP não passou.")
+                print("  DSS validado final NÃO gerado para uso com RegControl ativo no OpenDSS.")
+                print("  Gerando apenas DSS diagnóstico NÃO VALIDADO.")
+                return _export_unvalidated_dss_for_diagnosis(step2, data, policy, out_dir)
             return original_export(data, policy, sets_info, results_by_case, out_dir)
         export_patched._runtime_patched = True
         step2.export_validated_dss = export_patched
