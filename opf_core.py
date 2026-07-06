@@ -1486,6 +1486,21 @@ def calc_fd_percent(m, data, sets_info):
     }
 
 
+VV_CURVE_MODE = 'FITTED'  # 'FITTED' (ajuste por percentis, atual) ou
+                           # 'IEEE_DEFAULT_CATB' (pontos fixos da norma,
+                           # sem otimização/ajuste por dados)
+
+# Pontos-padrão da curva Volt-VAR, Categoria B, IEEE 1547-2018 (Tabela 8):
+#   V1 = VRef - 0.08 VN, V2 = VRef - 0.03 VN,
+#   V3 = VRef + 0.03 VN, V4 = VRef + 0.08 VN  (VRef = VN = 1,0 pu)
+#   Q1 = +100% da capacidade reativa declarada (injeção plena)
+#   Q4 = -100% da capacidade reativa declarada (absorção plena)
+IEEE1547_CATB_V1 = 0.92
+IEEE1547_CATB_V2 = 0.97
+IEEE1547_CATB_V3 = 1.03
+IEEE1547_CATB_V4 = 1.08
+
+
 def _fit_vv_curve(V_arr, Q_arr, Q_max_obs):
     """Ajuste com restrições de separação mínima (IEEE 1547 Tabela 8).
 
@@ -1544,14 +1559,28 @@ def _vv_curve_eval(V, V1, V2, V3, V4, Qmax):
     return -Qmax
 
 
-def classify_inverters_from_opf(model, data, sets_info):
+def classify_inverters_from_opf(model, data, sets_info, vv_curve_mode=None):
     """
     Classifica os inversores (A/B/C) a partir do despacho ótimo do OPF e infere
     as curvas Volt-VAR do Grupo B. Versão standalone da lógica da seção (f),
     para uso ANTES do relatório (permite carregar a Via 2 como cenário base).
 
+    vv_curve_mode: None usa o default do módulo (VV_CURVE_MODE). Valores
+    aceitos:
+      - 'FITTED': ajusta V1..V4 por inversor a partir dos percentis do
+        despacho ótimo (_fit_vv_curve), como antes.
+      - 'IEEE_DEFAULT_CATB': usa os pontos fixos da Tabela 8 do IEEE
+        1547-2018 (Categoria B) para TODOS os inversores do Grupo B, sem
+        nenhum ajuste por dados. O rmse_pct ainda é calculado, comparando
+        o despacho ótimo observado contra essa curva fixa — serve para
+        medir o quanto a curva padrão "deixa na mesa" em relação ao
+        envelope ótimo, não para calibrar a curva.
+
     Retorna (groups, inferred_B, inv_data) com a mesma semântica da seção (f).
     """
+    mode = vv_curve_mode or VV_CURVE_MODE
+    if mode not in ('FITTED', 'IEEE_DEFAULT_CATB'):
+        raise ValueError(f"vv_curve_mode inválido: {mode!r}")
     import numpy as _np
     pvph_l = sets_info['pvph']
     hours = sets_info['hours']
@@ -1606,7 +1635,11 @@ def classify_inverters_from_opf(model, data, sets_info):
         d = inv_data[(b, ph)]
         V_arr = d['V_arr']; Q_arr = d['Q_arr']
         Q_max_obs = float(_np.percentile(_np.abs(Q_arr), 98))
-        V1, V2, V3, V4 = _fit_vv_curve(V_arr, Q_arr, Q_max_obs)
+        if mode == 'IEEE_DEFAULT_CATB':
+            V1, V2, V3, V4 = (IEEE1547_CATB_V1, IEEE1547_CATB_V2,
+                              IEEE1547_CATB_V3, IEEE1547_CATB_V4)
+        else:
+            V1, V2, V3, V4 = _fit_vv_curve(V_arr, Q_arr, Q_max_obs)
         Q_pred = _np.array([_vv_curve_eval(v, V1, V2, V3, V4, Q_max_obs)
                             for v in V_arr])
         rmse = float(_np.sqrt(_np.mean((Q_arr - Q_pred)**2)))
@@ -1614,6 +1647,7 @@ def classify_inverters_from_opf(model, data, sets_info):
         inferred_B.append({
             'bus': b, 'ph': ph, 'V1': V1, 'V2': V2, 'V3': V3, 'V4': V4,
             'Q_max': Q_max_obs / SBASE, 'rmse_pct': rmse_pct,
+            'vv_curve_mode': mode,
         })
     return groups, inferred_B, inv_data
 
