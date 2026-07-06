@@ -253,6 +253,10 @@ def fixed_point_solve(model, data, sets_info, policy, solver_getter,
                 model.u_tap[ph, t].unfix()
                 model.u_tap[ph, t].domain = pyo.Binary
 
+    def _extract_tap():
+        return {ph: {t: int(round(pyo.value(model.tap_pos[ph, t])))
+                    for t in hours} for ph in svr_phs}
+
     hist_dV, hist_dQ, hist_tc = [], [], []
     V_curr = _extract_V(model, sets_info)  # V inicial = warm-start
     # CORREÇÃO (bug real, achado por execução): quando a PRIMEIRA iteração já
@@ -263,15 +267,38 @@ def fixed_point_solve(model, data, sets_info, policy, solver_getter,
     # marca isso explicitamente: só vira True depois do PRIMEIRO solve que
     # realmente carregou uma solução.
     has_valid_v = False
+    # CORREÇÃO (achada por inspeção, tap_mode='optimal'): tap_final agora é
+    # um SNAPSHOT tirado no MESMO instante que V_curr/Qpv_new, não relido de
+    # model.tap_pos depois que fixed_point_solve já retornou. Antes, quando
+    # uma iteração posterior falhava (ex.: status=unknown por timeout do
+    # MILP), quem chamava esta função lia model.tap_pos DIRETO do modelo
+    # após o retorno — se o solve que falhou tivesse deixado algum
+    # incumbente parcial carregado (comportamento não garantido do
+    # Pyomo/CPLEX para status≠infeasible), tap_ops_total podia vir de uma
+    # iteração DIFERENTE da que V_final valida, uma inconsistência silenciosa
+    # entre o número de operações de tap reportado e o estado elétrico
+    # validado. Com o snapshot, os dois vêm sempre da mesma iteração válida.
+    tap_curr = _extract_tap()
 
     for it in range(1, max_outer + 1):
         Qpv_new, max_dQ_fix = _apply_policy_qpv(model, data, sets_info,
                                                 policy, V_curr)
 
         opt, which = solver_getter()
-        opts = {'timelimit': timelimit, 'mipgap': 0.01} if which == 'cplex' else {}
-        res = opt.solve(model, tee=tee, options=opts) if opts else \
-            opt.solve(model, tee=tee)
+        if which == 'cplex':
+            opts = {'timelimit': timelimit, 'mipgap': 0.01}
+            # warmstart=True: cada iteração resolve um MILP quase idêntico ao
+            # anterior (só Qpv mudou um pouco); dar o tap_pos da iteração
+            # anterior como ponto de partida ajuda o CPLEX a achar um
+            # incumbente rápido, reduzindo a chance de bater no timelimit
+            # (que aparenta ter sido a causa do status=unknown observado na
+            # it=3 de POLICY_OPTIMAL_TAP — o próprio refinador de conflitos
+            # também estourou seus 300s sem achar nada, o que combina mais
+            # com "não deu tempo de provar nada" do que com uma
+            # infeasibilidade estrutural como a do bug do gate T_VV).
+            res = opt.solve(model, tee=tee, warmstart=True, options=opts)
+        else:
+            res = opt.solve(model, tee=tee)
         tc = str(res.solver.termination_condition)
         hist_tc.append(tc)
 
@@ -294,11 +321,13 @@ def fixed_point_solve(model, data, sets_info, policy, solver_getter,
                          f"terá o IIS salvo.")
             return {'converged': False, 'n_iter': it, 'max_dV_hist': hist_dV,
                    'max_dQ_hist': hist_dQ, 'V_final': V_curr,
-                   'Qpv_final': Qpv_new, 'termination_hist': hist_tc,
+                   'Qpv_final': Qpv_new, 'tap_final': tap_curr,
+                   'termination_hist': hist_tc,
                    'has_valid_v': has_valid_v,
                    'failure_reason': f'solver_status={tc} na iteração {it}'}
 
         V_new = _extract_V(model, sets_info)
+        tap_curr = _extract_tap()
         has_valid_v = True
         max_dV = max((abs(V_new[k] - V_curr.get(k, V_new[k])) for k in V_new),
                     default=0.0)
@@ -312,12 +341,14 @@ def fixed_point_solve(model, data, sets_info, policy, solver_getter,
         if max_dV < TOL_V and max_dQ_fix < TOL_Q and it > 1:
             return {'converged': True, 'n_iter': it, 'max_dV_hist': hist_dV,
                    'max_dQ_hist': hist_dQ, 'V_final': V_curr,
-                   'Qpv_final': Qpv_new, 'termination_hist': hist_tc,
+                   'Qpv_final': Qpv_new, 'tap_final': tap_curr,
+                   'termination_hist': hist_tc,
                    'has_valid_v': has_valid_v}
 
     return {'converged': False, 'n_iter': max_outer, 'max_dV_hist': hist_dV,
            'max_dQ_hist': hist_dQ, 'V_final': V_curr,
-           'Qpv_final': Qpv_new, 'termination_hist': hist_tc,
+           'Qpv_final': Qpv_new, 'tap_final': tap_curr,
+           'termination_hist': hist_tc,
            'has_valid_v': has_valid_v,
            'failure_reason': f'não convergiu em {max_outer} iterações '
                              f'(último ΔV={hist_dV[-1]:.2e}, '
@@ -858,6 +889,11 @@ def validate_policy_abc_with_opf(buses_file, branches_file, policy_dir='.',
     if r1.get('has_valid_v'):
         ok1, rep1 = check_acceptance(r1['V_final'], sets_info, data,
                                      tap_ops_opf_livre, baseline_tap_ops)
+        # cosmético: tap_ops_politica já vem certo de check_acceptance (usa
+        # tap_ops_opf_livre, correto para este caso — o tap É o do OPF
+        # livre), mas o RESUMO final lê 'tap_ops_total' especificamente;
+        # sem esta linha aparecia "tap_ops=-" mesmo com tudo aprovado.
+        rep1['tap_ops_total'] = tap_ops_opf_livre
     else:
         ok1, rep1 = _report_not_evaluable(r1.get('failure_reason', '?'))
     rep1['converged'] = r1['converged']; rep1['n_iter'] = r1['n_iter']
@@ -872,9 +908,16 @@ def validate_policy_abc_with_opf(buses_file, branches_file, policy_dir='.',
                                 solver_getter, timelimit, tee,
                                 diagnose_module=diagnose_module, out_dir=out_dir)
     if r2.get('has_valid_v'):
-        tap_traj2 = {ph: {t: int(round(pyo.value(model2.tap_pos[ph, t])))
-                         for t in sets_info2['hours']}
-                    for ph in sets_info2['svr_phs']}
+        # CORREÇÃO: antes lia model2.tap_pos direto do modelo AQUI, depois
+        # que fixed_point_solve já tinha retornado. Se a última tentativa
+        # de solve (a que falhou, ex.: status=unknown) tivesse deixado
+        # algum incumbente parcial carregado no modelo, tap_ops_total
+        # podia vir de uma iteração DIFERENTE daquela cujo V_final foi
+        # validado — uma inconsistência silenciosa. Agora usa tap_final,
+        # o snapshot que fixed_point_solve tira no EXATO mesmo instante em
+        # que extrai V_final, garantindo que os dois sempre vêm da mesma
+        # iteração.
+        tap_traj2 = r2['tap_final']
         ops2, total2 = _count_tap_ops(tap_traj2)
         ok2, rep2 = check_acceptance(r2['V_final'], sets_info2, data, total2,
                                      baseline_tap_ops)
