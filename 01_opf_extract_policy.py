@@ -325,8 +325,13 @@ def export_tap_schedule(model, sets_info, solve_meta, out_dir):
 def export_classification_and_curves(groups, inferred_B, inv_data, data,
                                      out_dir):
     pv_meta = data.get('pv_meta', {})
+    vv_mode_label = (inferred_B[0].get('vv_curve_mode', core.VV_CURVE_MODE)
+                     if inferred_B else core.VV_CURVE_MODE)
+    recommend_b = ('Volt-VAR_IEEE1547_CatB_padrao_fixo'
+                  if vv_mode_label == 'IEEE_DEFAULT_CATB'
+                  else 'Volt-VAR_IEEE1547_curva_inferida')
     recommend = {'A': 'FP_fixo_capacitivo_0.85',
-                'B': 'Volt-VAR_IEEE1547_curva_inferida', 'C': 'FP_unitario_1.00'}
+                'B': recommend_b, 'C': 'FP_unitario_1.00'}
 
     inferred_lookup = {(c['bus'], c['ph']): c for c in inferred_B}
 
@@ -383,16 +388,18 @@ def export_classification_and_curves(groups, inferred_B, inv_data, data,
     else:
         agg = {'V1': None, 'V2': None, 'V3': None, 'V4': None,
               'Q_max_kVAr': None, 'rmse_pct_mediana': None}
+    agg['vv_curve_mode'] = vv_mode_label
     with open(p3, 'w', newline='') as f:
         w = csv.writer(f)
         w.writerow(list(agg.keys()))
-        w.writerow([f"{v:.4f}" if v is not None else '' for v in agg.values()])
+        w.writerow([f"{v:.4f}" if isinstance(v, float) else (v if v is not None else '')
+                   for v in agg.values()])
     print(f"  [CSV] {p3}")
 
     return p1, p2, p3, agg
 
 
-def export_policy_json(groups, agg_curve, inv_data, out_dir):
+def export_policy_json(groups, agg_curve, inv_data, out_dir, vv_curve_mode=None):
     """policy_abc.json — a política candidata em formato consumível pelo
     Código 2 (não é a política VALIDADA; ver aviso no cabeçalho do arquivo)."""
     path = os.path.join(out_dir, 'policy_abc.json')
@@ -405,6 +412,7 @@ def export_policy_json(groups, agg_curve, inv_data, out_dir):
                   for g, lst in groups.items()},
         'contagem': {g: len(lst) for g, lst in groups.items()},
         'curva_agregada': agg_curve,
+        'vv_curve_mode': vv_curve_mode or core.VV_CURVE_MODE,
         'PF_A': 0.85,
     }
     with open(path, 'w') as f:
@@ -449,27 +457,25 @@ def export_diagnostics_json(model, data, sets_info, solve_meta, ops_by_phase,
 
 
 # =============================================================================
-# FUNÇÃO PRINCIPAL
+# FASE 1 — resolver o OPF livre UMA vez (caro: Pyomo/CPLEX) e exportar os
+# artefatos que NÃO dependem do modo de curva Volt-VAR.
 # =============================================================================
-def run_opf_and_extract_policy(buses_file, branches_file, out_dir='.',
-                               timelimit1=TIMELIMIT_STAGE1,
-                               timelimit2=TIMELIMIT_STAGE2, tee=False,
-                               enable_phase_coupling=None):
-    """Executa o pipeline completo do Código 1. Retorna um dict com todos
-    os caminhos de arquivo gerados e os objetos em memória (model, groups,
-    inferred_B, inv_data) — úteis para inspeção interativa ou testes.
-
-    enable_phase_coupling: None mantém o default do opf_core (True); passe
-    False para desligar o acoplamento entre fases MT — IMPORTANTE: use o
-    MESMO valor no Código 1 e no Código 2, senão a política é extraída de
-    uma física e validada contra outra."""
+def solve_free_opf_stage(buses_file, branches_file, out_dir='.',
+                         timelimit1=TIMELIMIT_STAGE1,
+                         timelimit2=TIMELIMIT_STAGE2, tee=False,
+                         enable_phase_coupling=None):
+    """Resolve o OPF livre (Estágio 1 + Estágio 2) e exporta série temporal,
+    cronograma de tap e diagnóstico — nada disso depende de como o Grupo B
+    vai ser curvado depois. Retorna o modelo resolvido e os metadados
+    necessários para extract_and_export_policy_for_mode(...), para que a
+    comparação entre curvas NÃO precise resolver o Pyomo mais de uma vez."""
     if enable_phase_coupling is not None:
         core.ENABLE_PHASE_COUPLING = enable_phase_coupling
         print(f"  [config] ENABLE_PHASE_COUPLING = {core.ENABLE_PHASE_COUPLING}")
     os.makedirs(out_dir, exist_ok=True)
 
     print("=" * 78)
-    print("  CÓDIGO 1 — OPF LIVRE + EXTRAÇÃO DE POLÍTICA CANDIDATA A/B/C")
+    print("  CÓDIGO 1 — FASE 1: OPF LIVRE (Estágio 1 + Estágio 2)")
     print("=" * 78)
 
     data = core.load_data(buses_file, branches_file)
@@ -510,14 +516,44 @@ def run_opf_and_extract_policy(buses_file, branches_file, out_dir='.',
     tap_path, ops_by_phase, total_ops = export_tap_schedule(
         model, sets_info, solve_meta, out_dir)
 
-    print("\n  Classificando inversores a partir do despacho ótimo livre...")
+    print(f"\n  FASE 1 concluída | tap_ops_livre={total_ops} | "
+         f"estágio2={solve_meta['stage2_termination']}")
+
+    return {
+        'model': model, 'data': data, 'sets_info': sets_info,
+        'solve_meta': solve_meta, 'ops_by_phase': ops_by_phase,
+        'total_ops': total_ops,
+        'paths': {'opf_solution_timeseries': ts_path,
+                 'tap_schedule_opf': tap_path},
+    }
+
+
+# =============================================================================
+# FASE 2 — classificar + exportar a política candidata para UM modo de
+# curva Volt-VAR, reaproveitando o modelo já resolvido na Fase 1.
+# =============================================================================
+def extract_and_export_policy_for_mode(solved, out_dir, vv_curve_mode):
+    """solved: dict retornado por solve_free_opf_stage(...).
+    vv_curve_mode: 'FITTED' ou 'IEEE_DEFAULT_CATB' (ver
+    core.classify_inverters_from_opf). Não resolve o Pyomo de novo — só
+    reinterpreta a MESMA solução ótima sob a curva escolhida."""
+    model = solved['model']; data = solved['data']
+    sets_info = solved['sets_info']; solve_meta = solved['solve_meta']
+    ops_by_phase = solved['ops_by_phase']; total_ops = solved['total_ops']
+    os.makedirs(out_dir, exist_ok=True)
+
+    print("\n" + "-" * 78)
+    print(f"  CÓDIGO 1 — FASE 2: classificação/curvas | vv_curve_mode={vv_curve_mode}")
+    print("-" * 78)
+
     groups, inferred_B, inv_data = core.classify_inverters_from_opf(
-        model, data, sets_info)
+        model, data, sets_info, vv_curve_mode=vv_curve_mode)
     print(f"    A={len(groups['A'])} B={len(groups['B'])} C={len(groups['C'])}")
 
     p1, p2, p3, agg_curve = export_classification_and_curves(
         groups, inferred_B, inv_data, data, out_dir)
-    policy_path = export_policy_json(groups, agg_curve, inv_data, out_dir)
+    policy_path = export_policy_json(groups, agg_curve, inv_data, out_dir,
+                                     vv_curve_mode=vv_curve_mode)
     diag_path = export_diagnostics_json(
         model, data, sets_info, solve_meta, ops_by_phase, total_ops,
         groups, out_dir)
@@ -535,6 +571,7 @@ def run_opf_and_extract_policy(buses_file, branches_file, out_dir='.',
             f.write(
                 "! ============================================================\n"
                 "! RASCUNHO — NAO VALIDADO. NAO IMPLANTAR.\n"
+                f"! vv_curve_mode = {vv_curve_mode}\n"
                 "! Gerado direto do OPF livre (Codigo 1), sem passar pela\n"
                 "! validacao autoconsistente Qpv=f(V) do Codigo 2. Pode conter\n"
                 "! ajustes que violam tensao quando avaliados de forma\n"
@@ -547,20 +584,36 @@ def run_opf_and_extract_policy(buses_file, branches_file, out_dir='.',
         print(f"  [AVISO] rascunho .dss não gerado: {e}")
         draft_path = None
 
-    print("\n" + "=" * 78)
-    print(f"  CÓDIGO 1 CONCLUÍDO | tap_ops_livre={total_ops} | "
-          f"A={len(groups['A'])} B={len(groups['B'])} C={len(groups['C'])}")
-    print("  Próximo passo: 02_validate_policy_abc_opf.py")
-    print("=" * 78)
+    # Métricas-resumo do ajuste do Grupo B para ESTE modo — usadas depois
+    # pela comparação entre modos. Ponderação por Q_max_inv: inversores com
+    # mais capacidade reativa "pesam mais" no erro agregado, porque um erro
+    # de ajuste ali tem mais impacto físico na rede do que num inversor
+    # pequeno na ponta do alimentador.
+    if inferred_B:
+        rmses = [c['rmse_pct'] for c in inferred_B]
+        qmax_lookup = {(b, ph): d['Q_max_inv'] for (b, ph), d in inv_data.items()}
+        weights = [qmax_lookup.get((c['bus'], c['ph']), 1.0) for c in inferred_B]
+        rmse_mean = sum(rmses) / len(rmses)
+        rmse_weighted = (sum(r * w for r, w in zip(rmses, weights))
+                        / max(sum(weights), 1e-9))
+        rmse_max = max(rmses)
+        import statistics as _st
+        rmse_median = _st.median(rmses)
+    else:
+        rmse_mean = rmse_weighted = rmse_max = rmse_median = None
+
+    print(f"    [Grupo B | {vv_curve_mode}] rmse_pct: "
+         f"média={rmse_mean:.2f} | mediana={rmse_median:.2f} | "
+         f"ponderada_por_Qmax={rmse_weighted:.2f} | máx={rmse_max:.2f}"
+         if rmse_mean is not None else
+         f"    [Grupo B | {vv_curve_mode}] Grupo B vazio — sem rmse a reportar.")
 
     return {
-        'model': model, 'data': data, 'sets_info': sets_info,
         'groups': groups, 'inferred_B': inferred_B, 'inv_data': inv_data,
-        'solve_meta': solve_meta, 'tap_ops_total': total_ops,
-        'ops_by_phase': ops_by_phase,
+        'vv_curve_mode': vv_curve_mode,
+        'rmse_pct_mean': rmse_mean, 'rmse_pct_median': rmse_median,
+        'rmse_pct_weighted': rmse_weighted, 'rmse_pct_max': rmse_max,
         'paths': {
-            'opf_solution_timeseries': ts_path,
-            'tap_schedule_opf': tap_path,
             'inversores_classificacao': p1,
             'curvas_voltvar_individuais': p2,
             'curva_voltvar_agregada': p3,
@@ -571,8 +624,155 @@ def run_opf_and_extract_policy(buses_file, branches_file, out_dir='.',
     }
 
 
+# =============================================================================
+# ORQUESTRADOR — resolve uma vez, testa os dois modos de curva Volt-VAR e
+# imprime o veredito de qual usar como política candidata a seguir para o
+# Código 2.
+# =============================================================================
+def run_opf_and_compare_vv_curve_modes(buses_file, branches_file,
+                                       out_dir='.',
+                                       timelimit1=TIMELIMIT_STAGE1,
+                                       timelimit2=TIMELIMIT_STAGE2, tee=False,
+                                       enable_phase_coupling=None,
+                                       modes=('FITTED', 'IEEE_DEFAULT_CATB')):
+    """Executa a Fase 1 (OPF livre) uma única vez e a Fase 2 (classificação
+    + curvas) uma vez para cada modo em `modes`, escrevendo cada um em uma
+    subpasta de out_dir (out_dir/<modo>/). Ao final, compara o rmse_pct do
+    Grupo B entre os modos e IMPRIME um veredito de qual curva usar como
+    política candidata.
+
+    IMPORTANTE — o que este veredito mede e o que ele NÃO mede:
+      Mede quão bem cada curva reproduz o Qpv(t) que o OPF livre already
+      considerou ótimo para cada tensão observada (rmse_pct). É uma medida
+      honesta e a única disponível dentro do Código 1, porque o Código 1,
+      por desenho, não fecha o laço V->Q->V (isso é papel do Código 2).
+      NÃO mede violação de tensão, FD%, nem redução de operações de tap sob
+      a política fechada — só o Código 2 (validação autoconsistente) pode
+      confirmar se a curva com menor rmse_pct aqui também é a que produz
+      menos operações de tap e zero violações quando efetivamente aplicada
+      em malha fechada. Trate a saída deste orquestrador como um CRITÉRIO
+      DE TRIAGEM para decidir qual política levar ao Código 2 primeiro —
+      não como a validação final da tese."""
+    os.makedirs(out_dir, exist_ok=True)
+
+    solved = solve_free_opf_stage(
+        buses_file, branches_file, out_dir=out_dir,
+        timelimit1=timelimit1, timelimit2=timelimit2, tee=tee,
+        enable_phase_coupling=enable_phase_coupling)
+
+    resultados = {}
+    for mode in modes:
+        mode_dir = os.path.join(out_dir, mode.lower())
+        resultados[mode] = extract_and_export_policy_for_mode(
+            solved, mode_dir, vv_curve_mode=mode)
+
+    # ---- Veredito final -----------------------------------------------
+    print("\n" + "=" * 78)
+    print("  COMPARAÇÃO — CURVA AJUSTADA (FITTED) x CURVA PADRÃO IEEE 1547 CAT B")
+    print("=" * 78)
+
+    linhas = []
+    for mode, r in resultados.items():
+        n_b = len(r['groups']['B'])
+        if r['rmse_pct_mean'] is None:
+            linhas.append(f"  {mode:>18s} | Grupo B vazio (n=0) — sem base de comparação")
+        else:
+            linhas.append(
+                f"  {mode:>18s} | n_B={n_b:3d} | "
+                f"rmse_pct médio={r['rmse_pct_mean']:6.2f} | "
+                f"mediana={r['rmse_pct_median']:6.2f} | "
+                f"ponderado_por_Qmax={r['rmse_pct_weighted']:6.2f} | "
+                f"máx={r['rmse_pct_max']:6.2f}")
+    for l in linhas:
+        print(l)
+
+    comparaveis = {m: r for m, r in resultados.items()
+                  if r['rmse_pct_weighted'] is not None}
+    if len(comparaveis) < 2:
+        veredito = ("indeterminado (não há rmse_pct comparável para os dois "
+                   "modos — verifique se o Grupo B ficou vazio em algum deles)")
+        melhor_mode = None
+    else:
+        # Critério de decisão: menor rmse_pct PONDERADO por Q_max_inv (dá
+        # mais peso ao erro nos inversores com mais capacidade reativa,
+        # que são os que mais afetam a tensão de fato).
+        melhor_mode = min(comparaveis, key=lambda m: comparaveis[m]['rmse_pct_weighted'])
+        pior_mode = max(comparaveis, key=lambda m: comparaveis[m]['rmse_pct_weighted'])
+        delta = (comparaveis[pior_mode]['rmse_pct_weighted']
+                - comparaveis[melhor_mode]['rmse_pct_weighted'])
+        rotulo = {'FITTED': 'curva ajustada por percentis (individual/agregada)',
+                 'IEEE_DEFAULT_CATB': 'curva padrão fixa IEEE 1547-2018 Cat B'}
+        if delta < 1.0:
+            veredito = (f"praticamente EMPATADOS (Δrmse_pct ponderado = "
+                       f"{delta:.2f} p.p.) — a curva padrão IEEE não perde "
+                       f"quase nada de fidelidade ao despacho ótimo aqui. "
+                       f"Como ela dispensa ajuste por dados (mais simples de "
+                       f"justificar e de implementar em campo), ela é a opção "
+                       f"recomendada por parcimônia, a confirmar no Código 2.")
+            melhor_mode = melhor_mode  # tecnicamente menor, mas por pouco
+        else:
+            veredito = (f"melhor opção = {rotulo.get(melhor_mode, melhor_mode)} "
+                       f"(rmse_pct ponderado {comparaveis[melhor_mode]['rmse_pct_weighted']:.2f} "
+                       f"contra {comparaveis[pior_mode]['rmse_pct_weighted']:.2f} do outro modo, "
+                       f"Δ={delta:.2f} p.p.)")
+
+    print("-" * 78)
+    print(f"  VEREDITO (Código 1, critério de triagem por rmse_pct): {veredito}")
+    print("  Confirmação definitiva: rode os dois diretórios de política "
+         "pelo Código 2 (POLICY_FIXED_TAP e POLICY_OPTIMAL_TAP) e compare "
+         "tap_ops e violações de tensão MT/BT antes de decidir a política "
+         "final da tese.")
+    print("=" * 78)
+
+    return {
+        'solved': solved,
+        'resultados_por_modo': resultados,
+        'melhor_modo_por_rmse': melhor_mode,
+        'veredito': veredito,
+    }
+
+
+# =============================================================================
+# FUNÇÃO PRINCIPAL (compatibilidade — um único modo, sem comparação)
+# =============================================================================
+def run_opf_and_extract_policy(buses_file, branches_file, out_dir='.',
+                               timelimit1=TIMELIMIT_STAGE1,
+                               timelimit2=TIMELIMIT_STAGE2, tee=False,
+                               enable_phase_coupling=None,
+                               vv_curve_mode=None):
+    """Wrapper de compatibilidade: resolve o OPF livre e extrai a política
+    para UM único modo de curva (mantém a assinatura/uso anteriores). Para
+    testar os dois modos e obter o veredito comparativo, use
+    run_opf_and_compare_vv_curve_modes(...)."""
+    solved = solve_free_opf_stage(
+        buses_file, branches_file, out_dir=out_dir,
+        timelimit1=timelimit1, timelimit2=timelimit2, tee=tee,
+        enable_phase_coupling=enable_phase_coupling)
+    vv_mode_efetivo = vv_curve_mode or core.VV_CURVE_MODE
+    fase2 = extract_and_export_policy_for_mode(
+        solved, out_dir, vv_curve_mode=vv_mode_efetivo)
+
+    print("\n" + "=" * 78)
+    print(f"  CÓDIGO 1 CONCLUÍDO | tap_ops_livre={solved['total_ops']} | "
+         f"A={len(fase2['groups']['A'])} B={len(fase2['groups']['B'])} "
+         f"C={len(fase2['groups']['C'])}")
+    print("  Próximo passo: 02_validate_policy_abc_opf.py")
+    print("=" * 78)
+
+    return {
+        'model': solved['model'], 'data': solved['data'],
+        'sets_info': solved['sets_info'],
+        'groups': fase2['groups'], 'inferred_B': fase2['inferred_B'],
+        'inv_data': fase2['inv_data'],
+        'solve_meta': solved['solve_meta'], 'tap_ops_total': solved['total_ops'],
+        'ops_by_phase': solved['ops_by_phase'],
+        'vv_curve_mode': vv_mode_efetivo,
+        'paths': {**solved['paths'], **fase2['paths']},
+    }
+
+
 if __name__ == '__main__':
     BUSES = os.environ.get('BUSES_FILE', 'buses_1.xlsx')
     BRANCHES = os.environ.get('BRANCHES_FILE', 'branches_1.xlsx')
     OUT = os.environ.get('OUT_DIR', '.')
-    run_opf_and_extract_policy(BUSES, BRANCHES, OUT)
+    run_opf_and_compare_vv_curve_modes(BUSES, BRANCHES, OUT)
