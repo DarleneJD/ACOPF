@@ -1,0 +1,5 @@
+Nesta versão a classificação dos inversores em grupo é realmente aplicada? o Qpv é o que "controla", certo? não é mais uma varivel livre o que quero saber é se resolvemos estes problemas : 1)Discutir a necessidade do corte de pv
+
+2)Verificar a caracterização de cada grupo onde está entrando meus inversores trifásicos, 3)ajuste de pesos do ponto de vista operacional
+
+4)Efeito nas perdas do núcleo
